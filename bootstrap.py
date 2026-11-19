@@ -286,13 +286,14 @@ def _install_win(tool: str) -> bool:
             log("OK", f"terraform {v} → {_TOOLS_DIR}")
 
         elif tool == "az":
-            msi = Path(os.environ["TEMP"]) / "azure-cli.msi"
-            _fetch("https://aka.ms/installazurecliwindows", msi)
-            subprocess.run(["msiexec", "/i", str(msi), "/quiet", "/norestart"], check=True)
-            az_wbin = Path("C:/Program Files/Microsoft SDKs/Azure/CLI2/wbin")
-            if az_wbin.exists():
-                _add_path_win(az_wbin)
-            log("OK", "Azure CLI installed")
+            # pip install azure-cli works without admin and uses the already-installed Python
+            py = sys.executable
+            subprocess.run([py, "-m", "pip", "install", "--quiet", "azure-cli"], check=True)
+            # az lands in the Scripts folder next to python.exe
+            scripts = Path(py).parent / "Scripts"
+            if scripts.exists():
+                _add_path_win(scripts)
+            log("OK", "Azure CLI installed via pip")
 
         elif tool == "kubectl":
             v = _kubectl_version()
@@ -307,8 +308,20 @@ def _install_win(tool: str) -> bool:
             log("OK", f"argocd {v} → {_TOOLS_DIR}")
 
         elif tool == "kustomize":
-            v = _VERSIONS["kustomize"]
-            vn = v.lstrip("v")
+            # Fetch latest kustomize release tag from GitHub API
+            try:
+                with urllib.request.urlopen(
+                    "https://api.github.com/repos/kubernetes-sigs/kustomize/releases?per_page=20",
+                    timeout=10,
+                ) as r:
+                    rels = json.loads(r.read())
+                v = next(
+                    rel["tag_name"].replace("kustomize/", "")
+                    for rel in rels
+                    if rel["tag_name"].startswith("kustomize/")
+                )
+            except Exception:
+                v = _VERSIONS["kustomize"]
             url = (f"https://github.com/kubernetes-sigs/kustomize/releases/download/"
                    f"kustomize%2F{v}/kustomize_{v}_windows_amd64.tar.gz")
             with tempfile.TemporaryDirectory() as tmp:
@@ -353,8 +366,9 @@ def _install_linux(tool: str) -> bool:
                "chmod +x /tmp/argocd && sudo mv /tmp/argocd /usr/local/bin/argocd")
 
         elif tool == "kustomize":
-            sh("curl -s https://raw.githubusercontent.com/kubernetes-sigs/kustomize/"
-               "master/hack/install_kustomize.sh | sudo bash -s /usr/local/bin")
+            sh("curl -s \"https://raw.githubusercontent.com/kubernetes-sigs/kustomize/"
+               "master/hack/install_kustomize.sh\" | bash && "
+               "sudo mv kustomize /usr/local/bin/kustomize")
 
         else:
             return False
