@@ -1,7 +1,47 @@
 global:
   domain: argocd.peerisland.yourdomain.com
 
+# ── Application Controller (StatefulSet) ─────────────────────────────────────
+# Reconciles all Argo apps. Needs solid memory; timeout flag makes it fail-fast
+# on dead repo-server connections instead of hanging indefinitely (root cause of
+# the global rpc error when repo-server restarts under load).
+controller:
+  extraArgs:
+    - --repo-server-timeout-seconds=60
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: "1500m"
+      memory: 1Gi
+
+# ── Repo Server ───────────────────────────────────────────────────────────────
+# Runs kustomize/helm on every sync — the component most likely to OOM on first
+# deploy when all 14 apps reconcile simultaneously.
+# 2 replicas: one stays up while the other restarts, so the controller always
+# has a live connection and never sees a global rpc error.
+repoServer:
+  replicas: 2
+  extraArgs:
+    - --parallelismlimit=5
+  resources:
+    requests:
+      cpu: 200m
+      memory: 256Mi
+    limits:
+      cpu: "1000m"
+      memory: 512Mi
+
+# ── ArgoCD Server (UI + API) ──────────────────────────────────────────────────
 server:
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 500m
+      memory: 128Mi
   ingress:
     enabled: true
     ingressClassName: nginx
@@ -15,14 +55,31 @@ server:
           - argocd.peerisland.yourdomain.com
         secretName: argocd-tls
 
+# ── ApplicationSet Controller ─────────────────────────────────────────────────
+applicationSet:
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
+# ── Redis ─────────────────────────────────────────────────────────────────────
+redis:
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 128Mi
+
 configs:
   params:
     server.insecure: false
   cm:
-    # Disable anonymous access
     users.anonymous.enabled: "false"
-    # Webhook URL for GitHub to trigger sync
-    # Set up a GitHub webhook pointing to: https://argocd.peerisland.yourdomain.com/api/webhook
     resource.customizations.ignoreDifferences.admissionregistration.k8s.io_MutatingWebhookConfiguration: |
       jqPathExpressions:
         - ".webhooks[]?.clientConfig.caBundle"

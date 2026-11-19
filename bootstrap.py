@@ -2404,15 +2404,44 @@ def _start_argocd_widget():
         _argocd_widget.start()
 
 
+def _ensure_argocd_resources_patched():
+    """
+    Apply (or re-apply) argocd-values.yaml via helm upgrade so that resource
+    limits, repo-server replicas=2, and --repo-server-timeout-seconds are live.
+    Idempotent — helm upgrade --install is a no-op when nothing changed.
+    Called once when a global rpc error is first detected.
+    """
+    argocd_values = REPO_ROOT / "argocd" / "argocd-values.yaml"
+    if not argocd_values.exists():
+        log("WARN", "argocd/argocd-values.yaml not found — skipping resource patch")
+        return
+    log("INFO", "Applying ArgoCD resource limits + repo-server replicas via helm upgrade …")
+    r = subprocess.run(
+        f'helm upgrade --install argocd argo/argo-cd '
+        f'--namespace argocd '
+        f'--version 6.7.3 '
+        f'--values "{argocd_values}" '
+        f'--wait --timeout 5m',
+        shell=True, capture_output=True, text=True,
+    )
+    if r.returncode == 0:
+        log("OK", "ArgoCD Helm values applied — resource limits and repo-server replicas=2 are now live")
+    else:
+        log("WARN", f"helm upgrade returned non-zero: {r.stderr.strip()[:200]}")
+
+
+_argocd_resources_patched = False
+
+
 def _argocd_global_rpc_check_and_fix(wait_healthy: bool = True, timeout: int = 300) -> bool:
     """
     Detect and fix a global ArgoCD rpc error, then wait until apps are no longer
     showing the error (or until *timeout* seconds).
 
-    When argocd-repo-server restarts, argocd-application-controller keeps stale
-    gRPC connections → ALL apps show 'rpc error: code = Unavailable'.
-    Hard-refreshing individual apps does nothing — only restarting the controller
-    clears the stale connections.
+    When argocd-repo-server restarts (e.g. OOMKilled due to missing resource limits),
+    argocd-application-controller keeps stale gRPC connections → ALL apps show
+    'rpc error: code = Unavailable'. Fix: patch resource limits (prevents future
+    OOM restarts) + restart the controller (clears stale connections now).
 
     Returns True if a fix was applied.  If wait_healthy=True (default), blocks
     until the rpc error is gone before returning so callers can proceed safely.
@@ -2451,7 +2480,15 @@ def _argocd_global_rpc_check_and_fix(wait_healthy: bool = True, timeout: int = 3
 
     log("WARN",
         f"Global rpc error: {rpc}/{total} apps affected — "
-        f"restarting argocd-application-controller …")
+        f"patching ArgoCD resources then restarting argocd-application-controller …")
+
+    # Patch resource limits + repo-server replicas once per session so the OOM
+    # that caused repo-server to restart in the first place doesn't repeat.
+    global _argocd_resources_patched
+    if not _argocd_resources_patched:
+        _ensure_argocd_resources_patched()
+        _argocd_resources_patched = True
+
     subprocess.run(
         "kubectl rollout restart statefulset argocd-application-controller -n argocd",
         shell=True,
@@ -2613,44 +2650,79 @@ def phase9_first_build(state: dict):
 #  PHASE 10 — Watch & promote Rollouts
 # ═════════════════════════════════════════════════════════════════════════════
 
+def _rollout_status_summary(svc: str) -> dict:
+    """Return a dict with phase, desired, ready, available, message from the Rollout."""
+    r = subprocess.run(
+        f"kubectl argo rollouts get rollout {svc} -n peerisland -o json",
+        shell=True, capture_output=True, text=True,
+    )
+    if r.returncode != 0 or not r.stdout.strip():
+        return {"phase": "unknown", "desired": "?", "ready": "?", "available": "?", "message": r.stderr.strip()}
+    try:
+        obj = json.loads(r.stdout)
+    except json.JSONDecodeError:
+        return {"phase": "unknown", "desired": "?", "ready": "?", "available": "?", "message": "bad json"}
+    st = obj.get("status", {})
+    spec = obj.get("spec", {})
+    return {
+        "phase":     st.get("phase", "unknown"),
+        "desired":   str(spec.get("replicas", "?")),
+        "ready":     str(st.get("readyReplicas", "0")),
+        "available": str(st.get("availableReplicas", "0")),
+        "message":   st.get("message", ""),
+    }
+
+
 def phase10_rollouts(state: dict):
     phase_header(10, "Watch & promote Rollouts (first deploy)")
     _start_argocd_widget()  # idempotent — already running from phase 9
     _argocd_global_rpc_check_and_fix()  # ensure controller is healthy before watching rollouts
 
+    # ── Wait for each Rollout to pause, then promote ──────────────────────────
     for svc in ("backend", "frontend"):
-        def paused(s=svc):
-            r = subprocess.run(
-                f"kubectl argo rollouts get rollout {s} -n peerisland -o json",
-                shell=True, capture_output=True, text=True,
-            )
-            if r.returncode != 0:
-                return False
-            ph = json.loads(r.stdout).get("status", {}).get("phase", "")
-            print(f"  {dim(f'  {s} phase: {ph}')}", end="\r", flush=True)
-            return ph == "Paused"
+        log("INFO", f"Watching {svc} Rollout — waiting for it to reach Paused …")
+        last_phase = ""
+        deadline = time.time() + 300
+        while time.time() < deadline:
+            info = _rollout_status_summary(svc)
+            ph = info["phase"]
+            if ph != last_phase:
+                log("INFO", f"  {svc}: phase={ph}  desired={info['desired']}  ready={info['ready']}  available={info['available']}"
+                    + (f"  ({info['message']})" if info["message"] else ""))
+                last_phase = ph
+            if ph == "Paused":
+                log("OK", f"  {svc} Rollout is Paused — green ReplicaSet is ready")
+                break
+            if ph in ("Degraded", "Error"):
+                log("WARN", f"  {svc} Rollout entered {ph} — {info['message']}")
+                # still keep waiting; it may recover
+            time.sleep(10)
+        else:
+            info = _rollout_status_summary(svc)
+            die(f"{svc} Rollout did not reach Paused within 300s. Last phase={info['phase']} message={info['message']!r}")
 
-        wait_for(paused, f"{svc} Rollout paused (green ReplicaSet ready)", timeout=300, interval=10)
-        print()
-
-        log("OK",   f"{svc}: promoting on first deploy (no manual traffic verification needed)")
+        log("OK", f"{svc}: promoting (first deploy — no manual traffic gate needed)")
         run(f"kubectl argo rollouts promote {svc} -n peerisland")
 
-    # Confirm both reach Healthy
+    # ── Confirm both reach Healthy ────────────────────────────────────────────
     for svc in ("backend", "frontend"):
-        def healthy(s=svc):
-            r = subprocess.run(
-                f"kubectl argo rollouts get rollout {s} -n peerisland -o json",
-                shell=True, capture_output=True, text=True,
-            )
-            if r.returncode != 0:
-                return False
-            ph = json.loads(r.stdout).get("status", {}).get("phase", "")
-            print(f"  {dim(f'  {s} phase: {ph}')}", end="\r", flush=True)
-            return ph == "Healthy"
-
-        wait_for(healthy, f"{svc} Rollout Healthy", timeout=120, interval=5)
-        print()
+        log("INFO", f"Waiting for {svc} Rollout to reach Healthy after promotion …")
+        last_phase = ""
+        deadline = time.time() + 300
+        while time.time() < deadline:
+            info = _rollout_status_summary(svc)
+            ph = info["phase"]
+            if ph != last_phase:
+                log("INFO", f"  {svc}: phase={ph}  desired={info['desired']}  ready={info['ready']}  available={info['available']}"
+                    + (f"  ({info['message']})" if info["message"] else ""))
+                last_phase = ph
+            if ph == "Healthy":
+                log("OK", f"  {svc} Rollout is Healthy")
+                break
+            time.sleep(10)
+        else:
+            info = _rollout_status_summary(svc)
+            die(f"{svc} Rollout did not reach Healthy within 300s after promotion. Last phase={info['phase']}")
 
     log("OK", "Both Rollouts promoted and Healthy")
     mark_done(state, 10)
