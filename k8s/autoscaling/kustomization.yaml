@@ -6,10 +6,11 @@ resources:
   - hpa/backend-hpa.yaml
   - hpa/frontend-hpa.yaml
 
-  # Vertical Pod Autoscalers
-  # Requires VPA CRDs — install first: make install-vpa
-  - vpa/backend-vpa.yaml
-  - vpa/frontend-vpa.yaml
+  # Vertical Pod Autoscalers — excluded until VPA CRDs are installed
+  # To enable: kubectl apply -f https://github.com/kubernetes/autoscaler/releases/latest/download/vertical-pod-autoscaler.yaml
+  # Then uncomment:
+  # - vpa/backend-vpa.yaml
+  # - vpa/frontend-vpa.yaml
 
   # Pod Disruption Budgets
   - pdb/backend-pdb.yaml
