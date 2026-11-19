@@ -10,10 +10,10 @@ resources:
 images:
 - name: PLACEHOLDER_ACR/backend
   newName: peerislandprodacr.azurecr.io/backend
-  newTag: d70bab83
+  newTag: 4cee1007
 - name: PLACEHOLDER_ACR/frontend
   newName: peerislandprodacr.azurecr.io/frontend
-  newTag: d70bab83
+  newTag: 4cee1007
 
 # Production-specific patches
 patches:
