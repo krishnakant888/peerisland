@@ -2838,29 +2838,71 @@ def main():
         # Temporarily patch expected list for _diagnose_and_fix_unhealthy
         # (it's defined inside phase8 so we call directly here)
         log("INFO", "Running auto-fix pass …")
-        # Quick inline fix pass
-        for name, s in status.items():
-            sync   = s.get("sync",   {}).get("status", "Unknown")
-            health = s.get("health", {}).get("status", "Unknown")
-            if sync == "Synced" and health in ("Healthy", "Progressing"):
-                continue
-            cond_msgs = [c.get("message", "") for c in s.get("conditions", [])]
-            hmsg      = s.get("health", {}).get("message", "")
-            all_text  = " ".join(cond_msgs + [hmsg]).lower()
-            if "rpc" in all_text or "failed to generate manifest" in all_text:
-                log("WARN", f"  {name}: rpc error — hard-refreshing")
-                subprocess.run(f"kubectl annotate application {name} -n argocd argocd.argoproj.io/refresh=hard --overwrite",
-                               shell=True, capture_output=True)
-            elif sync == "OutOfSync":
-                log("WARN", f"  {name}: OutOfSync — syncing")
-                subprocess.run(f"argocd app sync {name} --force --async", shell=True, capture_output=True)
-            elif "imagepullbackoff" in all_text or "errimagepull" in all_text:
-                log("WARN", f"  {name}: ImagePull error — images not in ACR yet")
-            elif sync == "Unknown" or health == "Unknown":
-                log("WARN", f"  {name}: Unknown — hard-refreshing")
-                subprocess.run(f"kubectl annotate application {name} -n argocd argocd.argoproj.io/refresh=hard --overwrite",
-                               shell=True, capture_output=True)
-        log("OK", "Diagnose pass done — re-run --diagnose in 30s to see updated status")
+
+        # Detect global rpc error: if most apps share the same rpc/unavailable message,
+        # the application-controller has stale connections → restart it (not individual refreshes)
+        rpc_count = sum(
+            1 for s in status.values()
+            if any(
+                "rpc" in c.get("message", "").lower()
+                or "failed to generate manifest" in c.get("message", "").lower()
+                or "unavailable" in c.get("message", "").lower()
+                for c in s.get("conditions", [])
+            )
+        )
+        total_apps = len(status)
+        if rpc_count >= max(3, total_apps // 2):
+            log("WARN",
+                f"Global rpc error: {rpc_count}/{total_apps} apps affected — "
+                f"restarting argocd-application-controller …")
+            subprocess.run(
+                "kubectl rollout restart statefulset argocd-application-controller -n argocd",
+                shell=True,
+            )
+            subprocess.run(
+                "kubectl rollout status statefulset argocd-application-controller -n argocd --timeout=180s",
+                shell=True,
+            )
+            log("INFO", "Hard-refreshing all apps …")
+            subprocess.run(
+                "kubectl annotate applications -n argocd --all "
+                "argocd.argoproj.io/refresh=hard --overwrite",
+                shell=True, capture_output=True,
+            )
+            log("OK",
+                "application-controller restarted + all apps hard-refreshed.\n"
+                "  Wait 30 s then re-run:  python bootstrap.py --diagnose")
+        else:
+            # Per-app targeted fixes
+            for name, s in status.items():
+                sync   = s.get("sync",   {}).get("status", "Unknown")
+                health = s.get("health", {}).get("status", "Unknown")
+                if sync == "Synced" and health in ("Healthy", "Progressing"):
+                    continue
+                cond_msgs = [c.get("message", "") for c in s.get("conditions", [])]
+                hmsg      = s.get("health", {}).get("message", "")
+                all_text  = " ".join(cond_msgs + [hmsg]).lower()
+                if "rpc" in all_text or "failed to generate manifest" in all_text:
+                    log("WARN", f"  {name}: rpc error — hard-refreshing")
+                    subprocess.run(
+                        f"kubectl annotate application {name} -n argocd "
+                        f"argocd.argoproj.io/refresh=hard --overwrite",
+                        shell=True, capture_output=True,
+                    )
+                elif sync == "OutOfSync":
+                    log("WARN", f"  {name}: OutOfSync — syncing")
+                    subprocess.run(f"argocd app sync {name} --force --async",
+                                   shell=True, capture_output=True)
+                elif "imagepullbackoff" in all_text or "errimagepull" in all_text:
+                    log("WARN", f"  {name}: ImagePull error — images not in ACR yet")
+                elif sync == "Unknown" or health == "Unknown":
+                    log("WARN", f"  {name}: Unknown — hard-refreshing")
+                    subprocess.run(
+                        f"kubectl annotate application {name} -n argocd "
+                        f"argocd.argoproj.io/refresh=hard --overwrite",
+                        shell=True, capture_output=True,
+                    )
+            log("OK", "Per-app fix pass done — re-run --diagnose in 30 s to see updated status")
         return
 
     DRY_RUN = args.dry_run
