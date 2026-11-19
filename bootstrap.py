@@ -209,19 +209,15 @@ def tf_apply(plan_file: str, cwd: Path) -> list[tuple[str, str]]:
                   f"{red(str(changes.get('remove',0)) + ' destroyed')}")
 
         elif mtype == "diagnostic":
-            diag    = msg.get("diagnostic", {}) or {}
-            detail  = diag.get("detail", "") or text
-            snippet = diag.get("snippet", {}) or {}
-            # Capture resource address from diagnostic snippet
-            if snippet.get("context"):
-                _last_diag_addr[0] = snippet["context"].split(" ")[0] if snippet.get("context") else _last_diag_addr[0]
+            diag   = msg.get("diagnostic", {}) or {}
+            detail = diag.get("detail", "") or text
             if level == "error":
                 print(f"  {red('ERR')} {detail[:200]}")
-                # Detect "already exists" — extract Azure resource ID
-                if "already exists" in detail:
+                # Detect "already exists" — addr was set by apply_errored above
+                if "already exists" in detail and _last_diag_addr[0]:
                     import re as _re
                     id_match = _re.search(r'"/subscriptions/[^"]+?"', detail)
-                    if id_match and _last_diag_addr[0]:
+                    if id_match:
                         azure_id = id_match.group(0).strip('"')
                         already_exists.append((_last_diag_addr[0], azure_id))
                         log("WARN", f"Will auto-import: {_last_diag_addr[0]}")
