@@ -14,9 +14,10 @@ kubernetes_version = "1.29.9"
 
 # Standard_D4s_v3 = 4 vCPU / 16 GB — minimum for LGTM stack + app pods
 # Standard_D8s_v3 = 8 vCPU / 32 GB — recommended under sustained load
-node_pool_vm_size   = "Standard_D4s_v3"
-node_pool_min_count = 2    # both system and user pool floor
-node_pool_max_count = 10
+node_pool_vm_size        = "Standard_D4s_v3"
+node_pool_min_count      = 1    # system pool floor (only system pods)
+user_node_pool_min_count = 2    # user pool floor — 2 nodes so pods spread across them
+node_pool_max_count      = 10
 
 # API server is locked to these CIDRs — add your CI/CD egress IP and your VPN
 authorized_ip_ranges = [

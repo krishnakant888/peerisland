@@ -48,7 +48,7 @@ variable "node_pool_min_count" {
 variable "user_node_pool_min_count" {
   description = "Minimum number of nodes for the user node pool"
   type        = number
-  default     = 1
+  default     = 2
 }
 
 variable "user_node_pool_max_count" {
