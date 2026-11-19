@@ -1831,7 +1831,40 @@ def _oidc_tf_apply():
     )
     if rc != 0:
         log("WARN", f"  terraform apply failed (exit {rc})")
-        log("WARN", f"  last output: {out[-400:]}")
+        # 409 Conflict: credential with name github-main already exists in Azure AD
+        # but not in Terraform state (happens after terraform state rm).
+        # Delete the orphaned credential from Azure AD and retry once.
+        if "409" in out or "already exists" in out.lower():
+            log("WARN", "  409 Conflict on federated credential — deleting orphaned credential and retrying …")
+            client_id_now, obj_id_now = _tf_cicd_app_ids()
+            app_id_for_del = obj_id_now or client_id_now
+            if app_id_for_del:
+                creds_raw = capture(
+                    f"az ad app federated-credential list --id {app_id_for_del} -o json",
+                    check=False,
+                )
+                for cred in json.loads(creds_raw or "[]"):
+                    subprocess.run(
+                        f"az ad app federated-credential delete "
+                        f"--id {app_id_for_del} "
+                        f"--federated-credential-id {cred['id']}",
+                        shell=True, capture_output=True,
+                    )
+                    log("INFO", f"  Deleted orphaned credential {cred.get('name')}")
+                rc, out = _tf_stream(
+                    "terraform apply "
+                    "-target=azuread_application.cicd "
+                    "-target=azuread_service_principal.cicd "
+                    "-target=azuread_application_federated_identity_credential.github_main "
+                    "-auto-approve",
+                    str(tf_dir),
+                )
+                if rc == 0:
+                    log("OK", "  terraform apply succeeded on retry")
+                else:
+                    log("WARN", f"  retry also failed: {out[-300:]}")
+        else:
+            log("WARN", f"  last output: {out[-400:]}")
     else:
         log("OK", "  terraform apply succeeded")
 
@@ -2002,6 +2035,32 @@ def _refresh_github_secrets(state: dict, org: str, repo_name: str):
                 f"  App {app_obj_id} does not exist in Azure AD — Terraform state is stale\n"
                 f"  Removing stale state entries and re-applying …")
             tf_dir = REPO_ROOT / "terraform"
+            # Before removing the federated credential from Terraform state, also
+            # delete it from Azure AD (if it somehow still exists there under the new app).
+            # Without this, terraform apply gets a 409 Conflict on the credential.
+            # We don't know the new app's object_id yet, so delete by display-name search.
+            for existing_app in json.loads(
+                capture(
+                    "az ad app list --display-name peerisland-prod-cicd "
+                    '--query "[].id" -o json',
+                    check=False,
+                ) or "[]"
+            ):
+                try:
+                    creds_raw = capture(
+                        f"az ad app federated-credential list --id {existing_app} -o json",
+                        check=False,
+                    )
+                    for cred in json.loads(creds_raw or "[]"):
+                        subprocess.run(
+                            f"az ad app federated-credential delete "
+                            f"--id {existing_app} "
+                            f"--federated-credential-id {cred['id']}",
+                            shell=True, capture_output=True,
+                        )
+                        log("INFO", f"  Deleted stale credential {cred.get('name')} from app {existing_app[:8]}…")
+                except Exception:
+                    pass
             for res in [
                 "azuread_application_federated_identity_credential.github_main",
                 "azuread_service_principal.cicd",
