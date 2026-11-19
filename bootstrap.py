@@ -1210,7 +1210,8 @@ def phase7_argocd(state: dict):
         f"--from-literal=admin-password={grafana_pass} "
         f"--dry-run=client -o yaml | kubectl apply -f -"
     )
-    log("OK", "grafana-admin-secret ready in monitoring namespace")
+    log("OK", f"grafana-admin-secret ready  →  username: admin  password: {grafana_pass}")
+    state["data"]["grafana_admin_password"] = grafana_pass
 
     # Apply App of Apps
     run("kubectl apply -f argocd/app-of-apps.yaml")
