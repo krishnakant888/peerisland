@@ -133,8 +133,32 @@ def run(
         print(f"  {dim(line)}")
         _fh().write(f"  {line}\n")
 
-    if check and result.returncode != 0:
-        die(f"Command failed (exit {result.returncode}): {display}")
+    if result.returncode != 0:
+        # Detect "command not found" (exit 127 on bash, or Windows "not recognized")
+        err_out = (result.stderr or "") + (result.stdout or "")
+        not_found = (result.returncode == 127 or
+                     "not recognized" in err_out.lower() or
+                     "is not recognized" in err_out.lower() or
+                     "command not found" in err_out.lower())
+        if not_found:
+            tool = display.split()[0]  # first word of the command is the binary
+            if tool in _AUTO_INSTALLABLE and tool not in _verified_tools:
+                log("WARN", f"{tool} not found — auto-installing and retrying …")
+                _require_tool(tool)
+                # retry once
+                result = subprocess.run(
+                    cmd,
+                    shell=isinstance(cmd, str),
+                    capture_output=capture,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    cwd=str(cwd or REPO_ROOT),
+                    env=env or os.environ.copy(),
+                    input=input_text,
+                )
+        if check and result.returncode != 0:
+            die(f"Command failed (exit {result.returncode}): {display}")
     return result
 
 
@@ -297,13 +321,13 @@ def wait_for(fn, description: str, timeout: int = 300, interval: int = 10):
 def load_state() -> dict:
     if STATE_FILE.exists():
         try:
-            return json.loads(STATE_FILE.read_text())
+            return json.loads(STATE_FILE.read_text(encoding="utf-8"))
         except Exception:
             pass
     return {"completed": [], "data": {}}
 
 def save_state(state: dict):
-    STATE_FILE.write_text(json.dumps(state, indent=2))
+    STATE_FILE.write_text(json.dumps(state, indent=2), encoding="utf-8")
 
 def mark_done(state: dict, n: int):
     if n not in state["completed"]:
@@ -343,7 +367,7 @@ def _ensure_tfvars(state: dict):
         log("WARN", "terraform.tfvars.example not found — skipping tfvars creation")
         return
 
-    content = tfvars_ex.read_text()
+    content = tfvars_ex.read_text(encoding="utf-8")
 
     # Substitute known values
     org  = state["data"].get("github_org",  "")
@@ -360,7 +384,7 @@ def _ensure_tfvars(state: dict):
         # remove the VPN placeholder line
         content = content.replace('  "5.6.7.8/32",   # VPN gateway\n', '')
 
-    tfvars.write_text(content)
+    tfvars.write_text(content, encoding="utf-8")
     log("OK",   f"Created terraform/terraform.tfvars (github_org={org or '?'}, ip={ip or '?'})")
     log("INFO", f"Review {tfvars} before continuing — edit node sizes, tags, etc. if needed")
     input(f"  {yellow('Press Enter once you have reviewed terraform.tfvars…')}")
@@ -437,6 +461,17 @@ def _install_win(tool: str) -> bool:
             url = f"https://dl.k8s.io/release/{v}/bin/windows/amd64/kubectl.exe"
             _fetch(url, _TOOLS_DIR / "kubectl.exe")
             log("OK", f"kubectl {v} → {_TOOLS_DIR}")
+
+        elif tool == "helm":
+            v = "v3.16.3"
+            url = f"https://get.helm.sh/helm-{v}-windows-amd64.zip"
+            with tempfile.TemporaryDirectory() as tmp:
+                z = Path(tmp) / "helm.zip"
+                _fetch(url, z)
+                with zipfile.ZipFile(z) as zf:
+                    zf.extract("windows-amd64/helm.exe", tmp)
+                Path(tmp, "windows-amd64", "helm.exe").rename(_TOOLS_DIR / "helm.exe")
+            log("OK", f"helm {v} → {_TOOLS_DIR}")
 
         elif tool == "kubelogin":
             # Download latest kubelogin release for Windows
@@ -549,6 +584,9 @@ def _install_linux(tool: str) -> bool:
             sh(f"curl -sLo /tmp/kubectl https://dl.k8s.io/release/{v}/bin/linux/amd64/kubectl && "
                "chmod +x /tmp/kubectl && sudo mv /tmp/kubectl /usr/local/bin/kubectl")
 
+        elif tool == "helm":
+            sh("curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash")
+
         elif tool == "kubelogin":
             sh("curl -sL https://github.com/Azure/kubelogin/releases/latest/download/kubelogin-linux-amd64.zip "
                "-o /tmp/kubelogin.zip && unzip -qo /tmp/kubelogin.zip -d /tmp/kubelogin && "
@@ -576,6 +614,50 @@ def _install_linux(tool: str) -> bool:
 def _auto_install(tool: str) -> bool:
     log("INFO", f"Auto-installing {tool} …")
     return _install_win(tool) if _IS_WIN else _install_linux(tool)
+
+
+# Tools that can be auto-installed on demand
+_AUTO_INSTALLABLE = {"terraform", "az", "kubectl", "kubelogin", "helm", "argocd", "kustomize"}
+
+# Track which tools have already been verified this session to avoid re-checking
+_verified_tools: set[str] = set()
+
+
+_TOOL_PROBES = {
+    "az":        "az version",
+    "kubectl":   "kubectl version --client",
+    "kubelogin": "kubelogin --version",
+    "helm":      "helm version",
+    "argocd":    "argocd version --client",
+    "kustomize": "kustomize version",
+    "terraform": "terraform --version",
+    "gh":        "gh --version",
+    "git":       "git --version",
+}
+
+
+def _require_tool(tool: str):
+    """Ensure a tool is on PATH, auto-installing it if needed. Dies if unavailable.
+
+    Safe to call from any phase — uses a session cache so repeated calls are free.
+    """
+    if tool in _verified_tools:
+        return
+    probe = _TOOL_PROBES.get(tool, f"{tool} --version")
+    if subprocess.run(probe, shell=True, capture_output=True).returncode == 0:
+        _verified_tools.add(tool)
+        return
+    # Not found — try to install
+    if tool not in _AUTO_INSTALLABLE:
+        die(f"{tool} is not installed and cannot be auto-installed — install it manually")
+    log("WARN", f"{tool} not found — auto-installing …")
+    if _auto_install(tool):
+        _ensure_tools_on_path()
+        if subprocess.run(probe, shell=True, capture_output=True).returncode == 0:
+            log("OK", f"{tool} installed and ready")
+            _verified_tools.add(tool)
+            return
+    die(f"{tool} auto-install failed or not on PATH — open a new terminal and re-run")
 
 
 _REQUIRED_PROVIDERS = [
@@ -612,37 +694,30 @@ def _register_azure_providers():
 def phase1_preflight(state: dict):
     phase_header(1, "Pre-flight checks")
 
-    tools = {
-        "terraform": "terraform --version",
-        "az":        "az version",
-        "kubectl":   "kubectl version --client",
-        "kubelogin": "kubelogin --version",
-        "argocd":    "argocd version --client",
-        "gh":        "gh --version",
-        "git":       "git --version",
-        "kustomize": "kustomize version",
-    }
-    # Tools we can install automatically; gh and git must be pre-installed
-    auto_installable = {"terraform", "az", "kubectl", "kubelogin", "argocd", "kustomize"}
+    # All tools needed across all phases — install everything upfront.
+    # gh and git must be pre-installed (no unattended install path).
+    # Everything else is auto-installed via _require_tool().
+    all_tools = [
+        "terraform", "az", "kubectl", "kubelogin",
+        "helm", "argocd", "kustomize",
+    ]
+    manual_tools = ["gh", "git"]
 
     still_missing = []
-    for tool, cmd in tools.items():
-        ok = subprocess.run(cmd, shell=True, capture_output=True).returncode == 0
-        if ok:
-            log("OK",  f"{tool:12} installed")
-            continue
-        if tool in auto_installable:
-            if _auto_install(tool):
-                ok = subprocess.run(cmd, shell=True, capture_output=True).returncode == 0
-                if ok:
-                    log("OK", f"{tool:12} installed (auto)")
-                    continue
-                log("ERR", f"{tool:12} install succeeded but still not on PATH — open a new terminal and re-run")
-            else:
-                log("ERR", f"{tool:12} auto-install failed")
+    for tool in manual_tools:
+        probe = {"gh": "gh --version", "git": "git --version"}[tool]
+        if subprocess.run(probe, shell=True, capture_output=True).returncode == 0:
+            log("OK", f"{tool:12} installed")
         else:
             log("ERR", f"{tool:12} NOT FOUND — install manually and re-run")
-        still_missing.append(tool)
+            still_missing.append(tool)
+
+    for tool in all_tools:
+        try:
+            _require_tool(tool)
+            log("OK", f"{tool:12} ready")
+        except SystemExit:
+            still_missing.append(tool)
 
     if still_missing:
         die(f"Could not install: {', '.join(still_missing)}")
@@ -716,10 +791,10 @@ def phase2_bootstrap_tfstate(state: dict):
 
             # Patch providers.tf backend block automatically
             providers_tf = REPO_ROOT / "terraform" / "providers.tf"
-            pf_content = providers_tf.read_text()
+            pf_content = providers_tf.read_text(encoding="utf-8")
             if "REPLACE_WITH_BOOTSTRAP_OUTPUT" in pf_content:
                 pf_content = pf_content.replace("REPLACE_WITH_BOOTSTRAP_OUTPUT", sa)
-                providers_tf.write_text(pf_content)
+                providers_tf.write_text(pf_content, encoding="utf-8")
                 log("OK", f"providers.tf backend patched → storage_account_name = {sa}")
             else:
                 log("INFO", "providers.tf already configured — skipping patch")
@@ -901,6 +976,8 @@ def phase4_terraform(state: dict):
 
 def phase5_kubectl(state: dict):
     phase_header(5, "Configure kubectl")
+    for t in ("kubectl", "kubelogin"):
+        _require_tool(t)
     cluster = state["data"].get("aks_cluster_name",  "peerisland-prod-aks")
     rg      = state["data"].get("aks_resource_group", "peerisland-prod-rg")
 
@@ -924,16 +1001,18 @@ def phase5_kubectl(state: dict):
         log("OK", f"  node {name} → {status}")
     log("OK", f"{len(items)} node(s) ready")
 
-    # Second attempt to get App Gateway IP if it wasn't found in phase 4
+    # Resolve ingress IP — try NGINX LB first, fall back to AppGW
     if not state["data"].get("appgw_ip"):
-        rg = state["data"].get("aks_resource_group", "peerisland-prod-rg")
-        appgw_ip = capture(
-            f"az network public-ip list -g {rg} --query \"[?contains(name,'appgw') || contains(name,'appgateway')].ipAddress\" -o tsv",
+        nginx_ip = capture(
+            "kubectl get svc ingress-nginx-controller -n ingress-nginx "
+            "-o jsonpath='{.status.loadBalancer.ingress[0].ip}'",
             check=False,
-        )
-        if appgw_ip.strip():
-            state["data"]["appgw_ip"] = appgw_ip.strip().splitlines()[0]
-            log("OK", f"App Gateway IP: {state['data']['appgw_ip']}")
+        ).strip()
+        if nginx_ip:
+            state["data"]["appgw_ip"] = nginx_ip
+            log("OK", f"Ingress IP (NGINX): {nginx_ip}")
+        else:
+            log("INFO", "NGINX LB IP not yet assigned — will resolve after ArgoCD sync")
 
     mark_done(state, 5)
 
@@ -1020,13 +1099,15 @@ def phase6_keyvault(state: dict):
 
 def phase7_argocd(state: dict):
     phase_header(7, "Install ArgoCD + App of Apps")
+    for t in ("kubectl", "helm", "argocd"):
+        _require_tool(t)
     org       = state["data"].get("github_org",  "")
     repo_name = state["data"].get("github_repo", "")
 
     # Patch placeholder org/repo in ArgoCD YAML files
     if org and repo_name:
         for yaml_path in (REPO_ROOT / "argocd").rglob("*.yaml"):
-            text = yaml_path.read_text()
+            text = yaml_path.read_text(encoding="utf-8", errors="replace")
             updated = False
             for placeholder in ("<YOUR_ORG>", "YOUR_ORG", "your-org"):
                 if placeholder in text:
@@ -1036,20 +1117,23 @@ def phase7_argocd(state: dict):
                 # Only replace standalone placeholders, not the actual project name in paths
                 pass  # repo name is already 'peerisland' in this project
             if updated:
-                yaml_path.write_text(text)
+                yaml_path.write_text(text, encoding="utf-8")
                 log("OK", f"Patched {yaml_path.relative_to(REPO_ROOT)}")
 
-    # Run the install script if it exists
-    install_sh = REPO_ROOT / "argocd" / "install-argocd.sh"
-    if install_sh.exists():
-        run(f"bash {install_sh}")
-    else:
-        log("INFO", "argocd/install-argocd.sh not found — installing ArgoCD manually")
-        run("kubectl create namespace argocd --dry-run=client -o yaml | kubectl apply -f -")
-        run(
-            "kubectl apply -n argocd -f "
-            "https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml"
-        )
+    # Install ArgoCD via Helm (matches install-argocd.sh but cross-platform)
+    argocd_values = REPO_ROOT / "argocd" / "argocd-values.yaml"
+    run("kubectl create namespace argocd --dry-run=client -o yaml | kubectl apply -f -")
+    run("helm repo add argo https://argoproj.github.io/argo-helm", check=False)
+    run("helm repo update")
+    helm_cmd = (
+        "helm upgrade --install argocd argo/argo-cd "
+        "--namespace argocd "
+        "--version 6.7.3 "
+        "--wait --timeout 10m"
+    )
+    if argocd_values.exists():
+        helm_cmd += f' --values "{argocd_values}"'
+    run(helm_cmd)
 
     # Wait for argocd-server deployment
     def argocd_ready():
@@ -1121,7 +1205,7 @@ def phase8_wait_argocd(state: dict):
         # wave 0
         "cert-manager", "monitoring-alloy-config",
         # wave 1
-        "cert-manager-config",
+        "cert-manager-config", "ingress-nginx",
         "monitoring-mimir", "monitoring-loki", "monitoring-tempo", "monitoring-alloy",
         # wave 2
         "monitoring-grafana", "monitoring-prometheus-adapter", "argo-rollouts",
