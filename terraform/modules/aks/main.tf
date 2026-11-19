@@ -29,7 +29,7 @@ resource "azurerm_kubernetes_cluster" "main" {
     type                         = "VirtualMachineScaleSets"
     os_disk_size_gb              = 128
     os_disk_type                 = "Managed"
-    only_critical_addons_enabled = true
+    only_critical_addons_enabled = false
 
     node_labels = {
       "nodepool-type" = "system"
@@ -66,14 +66,9 @@ resource "azurerm_kubernetes_cluster" "main" {
       kubernetes_version,
       default_node_pool[0].node_count,
       default_node_pool[0].max_pods,
-      # Properties that differ from defaults in azurerm 4.x and would require
-      # temporary_name_for_rotation (which fails if the VM SKU is unavailable).
-      default_node_pool[0].only_critical_addons_enabled,
-      default_node_pool[0].host_encryption_enabled,
-      default_node_pool[0].fips_enabled,
-      default_node_pool[0].node_public_ip_enabled,
-      default_node_pool[0].kubelet_config,
-      default_node_pool[0].linux_os_config,
+      # System pool was provisioned as D4s_v5; rotating to D2s_v3 requires a
+      # temporary pool which may fail in this region — ignore until planned.
+      default_node_pool[0].vm_size,
     ]
   }
 }
