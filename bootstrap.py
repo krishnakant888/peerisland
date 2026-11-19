@@ -1663,24 +1663,9 @@ def phase8_wait_argocd(state: dict):
                     break
         return rpc_count >= max(3, len(expected) // 2)
 
-    def _fix_global_rpc(status: dict):
-        """Restart app-controller + hard-refresh all apps to clear stale gRPC connections."""
-        log("WARN", "Global rpc error detected — restarting application-controller …")
-        subprocess.run(
-            "kubectl rollout restart statefulset argocd-application-controller -n argocd",
-            shell=True, capture_output=True,
-        )
-        subprocess.run(
-            "kubectl rollout status statefulset argocd-application-controller -n argocd --timeout=180s",
-            shell=True,
-        )
-        subprocess.run(
-            "kubectl annotate applications -n argocd --all "
-            "argocd.argoproj.io/refresh=hard --overwrite",
-            shell=True, capture_output=True,
-        )
-        log("OK", "application-controller restarted — waiting 20s for reconnect …")
-        time.sleep(20)
+    def _fix_global_rpc(_status: dict):
+        """Delegate to the top-level shared helper."""
+        _argocd_global_rpc_check_and_fix()
 
     _kustomize_fix_done = [False]  # mutable flag visible to nested functions
 
@@ -2419,6 +2404,66 @@ def _start_argocd_widget():
         _argocd_widget.start()
 
 
+def _argocd_global_rpc_check_and_fix():
+    """
+    Detect and fix a global ArgoCD rpc error in one call.
+
+    When argocd-repo-server restarts, argocd-application-controller keeps stale
+    gRPC connections → ALL apps show 'rpc error: code = Unavailable / failed to
+    generate manifest'.  Hard-refreshing individual apps does nothing — only
+    restarting the controller clears the stale connections.
+
+    Safe to call from any phase.  Returns True if a fix was applied.
+    """
+    r = subprocess.run(
+        "kubectl get applications -n argocd -o json",
+        shell=True, capture_output=True, text=True,
+    )
+    if r.returncode != 0:
+        log("WARN", "kubectl get applications failed — skipping rpc check")
+        return False
+
+    try:
+        items = json.loads(r.stdout).get("items", [])
+    except Exception:
+        return False
+
+    total = len(items)
+    if total == 0:
+        return False
+
+    rpc_count = 0
+    for a in items:
+        for cond in a.get("status", {}).get("conditions", []):
+            msg = cond.get("message", "").lower()
+            if "rpc" in msg or "failed to generate manifest" in msg or "unavailable" in msg:
+                rpc_count += 1
+                break
+
+    if rpc_count < max(3, total // 2):
+        return False  # not a global issue
+
+    log("WARN",
+        f"Global rpc error: {rpc_count}/{total} apps affected — "
+        f"restarting argocd-application-controller …")
+    subprocess.run(
+        "kubectl rollout restart statefulset argocd-application-controller -n argocd",
+        shell=True,
+    )
+    subprocess.run(
+        "kubectl rollout status statefulset argocd-application-controller -n argocd --timeout=180s",
+        shell=True,
+    )
+    subprocess.run(
+        "kubectl annotate applications -n argocd --all "
+        "argocd.argoproj.io/refresh=hard --overwrite",
+        shell=True, capture_output=True,
+    )
+    log("OK", "application-controller restarted — waiting 20 s for reconnect …")
+    time.sleep(20)
+    return True
+
+
 def _print_access_summary(state: dict):
     """Print ArgoCD, Grafana, and infra URLs with credentials. Called at Phase 9 end and Phase 11."""
     # Resolve nginx LB IP — may have been stored under different keys across phases
@@ -2494,6 +2539,10 @@ def phase9_first_build(state: dict):
 
     # Ensure all secrets carry real post-Terraform values (Phase 3 ran before TF)
     _refresh_github_secrets(state, org, repo_name)
+
+    # Fix global rpc before triggering the build — if app-controller is in a stale
+    # state it won't sync the new images after the build completes
+    _argocd_global_rpc_check_and_fix()
 
     result = run(
         f"gh workflow run build-push.yml --repo {slug} --ref main",
@@ -2839,36 +2888,8 @@ def main():
         # (it's defined inside phase8 so we call directly here)
         log("INFO", "Running auto-fix pass …")
 
-        # Detect global rpc error: if most apps share the same rpc/unavailable message,
-        # the application-controller has stale connections → restart it (not individual refreshes)
-        rpc_count = sum(
-            1 for s in status.values()
-            if any(
-                "rpc" in c.get("message", "").lower()
-                or "failed to generate manifest" in c.get("message", "").lower()
-                or "unavailable" in c.get("message", "").lower()
-                for c in s.get("conditions", [])
-            )
-        )
-        total_apps = len(status)
-        if rpc_count >= max(3, total_apps // 2):
-            log("WARN",
-                f"Global rpc error: {rpc_count}/{total_apps} apps affected — "
-                f"restarting argocd-application-controller …")
-            subprocess.run(
-                "kubectl rollout restart statefulset argocd-application-controller -n argocd",
-                shell=True,
-            )
-            subprocess.run(
-                "kubectl rollout status statefulset argocd-application-controller -n argocd --timeout=180s",
-                shell=True,
-            )
-            log("INFO", "Hard-refreshing all apps …")
-            subprocess.run(
-                "kubectl annotate applications -n argocd --all "
-                "argocd.argoproj.io/refresh=hard --overwrite",
-                shell=True, capture_output=True,
-            )
+        # Global rpc check — shared helper used by Phase 8, Phase 9, and here
+        if _argocd_global_rpc_check_and_fix():
             log("OK",
                 "application-controller restarted + all apps hard-refreshed.\n"
                 "  Wait 30 s then re-run:  python bootstrap.py --diagnose")
