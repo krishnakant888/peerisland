@@ -1911,6 +1911,10 @@ def phase8_wait_argocd(state: dict):
     else:
         log("OK", "argocd-cm kustomize.buildOptions already set — OK")
 
+    # Ensure argocd-cm ignores VWC/MWC caBundle drift from cert-manager-cainjector
+    # and AKS admissionsenforcer. This patch is idempotent and fast when already applied.
+    _argocd_ensure_webhook_ignore_patch()
+
     # Hard-refresh all apps so app-controller re-evaluates with fresh connections
     subprocess.run(
         "kubectl annotate applications -n argocd --all "
@@ -1968,7 +1972,8 @@ def phase8_wait_argocd(state: dict):
         """Delegate to the top-level shared helper."""
         _argocd_global_rpc_check_and_fix()
 
-    _kustomize_fix_done = [False]  # mutable flag visible to nested functions
+    _kustomize_fix_done        = [False]  # mutable flags visible to nested functions
+    _cainjector_ignore_patched = [False]
 
     def _diagnose_and_fix_unhealthy(status: dict):
         """
@@ -2041,6 +2046,37 @@ def phase8_wait_argocd(state: dict):
             # ── Fix 3: image pull failure — images not in ACR yet ─────────
             elif "imagepullbackoff" in all_text or "errimagepull" in all_text or "not found" in all_text:
                 log("WARN", f"  {name}: ImagePull error — images may not be in ACR yet (waiting for build)")
+
+            # ── Fix 4b: cert-manager VWC/MWC caBundle drift ──────────────
+            # cert-manager-cainjector and AKS admissionsenforcer both write
+            # the webhooks field via SSA, causing persistent OutOfSync on
+            # cert-manager unless argocd-cm ignores those managers' fields.
+            elif (name == "cert-manager" and sync == "OutOfSync"
+                  and not _cainjector_ignore_patched[0]):
+                # Check if the OutOfSync resources include VWC or MWC
+                resources = status.get(name, {}).get("resources", [])
+                webhook_outofsync = any(
+                    r.get("kind") in ("ValidatingWebhookConfiguration", "MutatingWebhookConfiguration")
+                    and r.get("status") == "OutOfSync"
+                    for r in resources
+                )
+                if webhook_outofsync or not resources:
+                    # Apply even when resources list is empty (can happen right after refresh)
+                    log("WARN",
+                        "  cert-manager: VWC/MWC OutOfSync — patching argocd-cm "
+                        "with managedFieldsManagers …")
+                    applied = _argocd_ensure_webhook_ignore_patch()
+                    _cainjector_ignore_patched[0] = True
+                    if applied:
+                        time.sleep(20)  # let app-controller reload before next check
+                        return
+                else:
+                    # Different resources are OutOfSync — fall through to generic sync
+                    log("WARN", f"  cert-manager: OutOfSync (non-webhook resource) — triggering sync …")
+                    subprocess.run(
+                        f"argocd app sync {name} --force --async",
+                        shell=True, capture_output=True,
+                    )
 
             # ── Fix 4: OutOfSync — trigger a sync ─────────────────────────
             elif sync == "OutOfSync":
@@ -2721,6 +2757,86 @@ def _start_argocd_widget():
         signal.signal(signal.SIGINT, _sigint_handler)
 
         _argocd_widget.start()
+
+
+def _argocd_ensure_webhook_ignore_patch() -> bool:
+    """Patch live argocd-cm so VWC/MWC caBundle drift is permanently ignored.
+
+    cert-manager-cainjector injects caBundle into webhook configurations after
+    every ArgoCD sync. AKS admissionsenforcer also modifies the webhooks field.
+    Both use SSA, so jsonPointers on specific paths is not enough — we must tell
+    ArgoCD to ignore every field owned by those two managers.
+
+    Returns True if the patch was freshly applied (app-controller was restarted).
+    """
+    # Read current argocd-cm
+    cm_r = subprocess.run(
+        "kubectl get configmap argocd-cm -n argocd -o json",
+        shell=True, capture_output=True, text=True, encoding="utf-8",
+    )
+    if cm_r.returncode != 0:
+        log("WARN", "  _argocd_ensure_webhook_ignore_patch: cannot read argocd-cm")
+        return False
+
+    try:
+        cm_data = json.loads(cm_r.stdout).get("data", {})
+    except Exception:
+        return False
+
+    vwc_key = (
+        "resource.customizations.ignoreDifferences"
+        ".admissionregistration.k8s.io_ValidatingWebhookConfiguration"
+    )
+    existing_vwc = cm_data.get(vwc_key, "")
+    if "managedFieldsManagers" in existing_vwc and "cert-manager-cainjector" in existing_vwc:
+        log("OK", "argocd-cm already has managedFieldsManagers for VWC/MWC — OK")
+        return False
+
+    log("WARN",
+        "argocd-cm missing managedFieldsManagers for VWC/MWC drift "
+        "(cert-manager-cainjector + admissionsenforcer) — patching …")
+
+    patch = {
+        "data": {
+            "resource.customizations.ignoreDifferences"
+            ".admissionregistration.k8s.io_MutatingWebhookConfiguration":
+                "managedFieldsManagers:\n  - cert-manager-cainjector\n  - admissionsenforcer\n",
+            "resource.customizations.ignoreDifferences"
+            ".admissionregistration.k8s.io_ValidatingWebhookConfiguration":
+                "managedFieldsManagers:\n  - cert-manager-cainjector\n  - admissionsenforcer\n",
+            "resource.customizations.ignoreDifferences"
+            ".apiextensions.k8s.io_CustomResourceDefinition":
+                "jsonPointers:\n  - /spec/conversion/webhook/clientConfig/caBundle\n",
+        }
+    }
+    patch_r = subprocess.run(
+        ["kubectl", "patch", "configmap", "argocd-cm", "-n", "argocd",
+         "--type", "merge", "-p", json.dumps(patch)],
+        capture_output=True, text=True, encoding="utf-8",
+    )
+    if patch_r.returncode != 0:
+        log("WARN",
+            f"  argocd-cm patch failed: {(patch_r.stderr or patch_r.stdout)[:200]}")
+        return False
+
+    log("INFO", "argocd-cm patched — restarting application-controller to reload …")
+    subprocess.run(
+        "kubectl rollout restart statefulset/argocd-application-controller -n argocd",
+        shell=True, capture_output=True,
+    )
+    subprocess.run(
+        "kubectl rollout status statefulset/argocd-application-controller -n argocd "
+        "--timeout=180s",
+        shell=True,
+    )
+    # Hard-refresh cert-manager so ArgoCD re-evaluates with new ignoreDifferences
+    subprocess.run(
+        "kubectl annotate application cert-manager -n argocd "
+        "argocd.argoproj.io/refresh=hard --overwrite",
+        shell=True, capture_output=True,
+    )
+    log("OK", "argocd-cm managedFieldsManagers patch applied — cert-manager will re-evaluate")
+    return True
 
 
 def _print_argocd_status_table(label: str = "ArgoCD Apps"):
