@@ -1,6 +1,22 @@
 # Mimir in monolithic mode — all components in one process
-# Scale to distributed mode later by changing `target`
+# Scale to distributed mode later by changing deploymentMode to Microservices
+deploymentMode: SingleBinary   # chart key for mimir-distributed 5.x; singleBinary key is ignored
+
 mimir:
+  replicas: 1
+  nodeSelector:
+    kubernetes.azure.com/mode: user
+  persistence:
+    enabled: true
+    size: 20Gi
+    storageClass: managed-premium
+  resources:
+    requests:
+      cpu: 500m
+      memory: 512Mi
+    limits:
+      cpu: 2000m
+      memory: 2Gi
   structuredConfig:
     target: all,alertmanager
 
@@ -73,19 +89,3 @@ alertmanager:
 overrides_exporter:
   replicas: 0
 
-# Monolithic deployment
-singleBinary:
-  replicas: 1
-  nodeSelector:
-    kubernetes.azure.com/mode: user
-  persistence:
-    enabled: true
-    size: 20Gi
-    storageClass: managed-premium
-  resources:
-    requests:
-      cpu: 500m
-      memory: 512Mi
-    limits:
-      cpu: 2000m
-      memory: 2Gi
