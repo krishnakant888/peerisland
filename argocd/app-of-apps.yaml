@@ -12,7 +12,7 @@ spec:
   project: default
 
   source:
-    repoURL: https://github.com/krishnakant888/peerisland.git
+    repoURL: https://github.com/<YOUR_ORG>/peerisland.git
     targetRevision: main
     path: argocd/applications   # contains all child Application manifests
 

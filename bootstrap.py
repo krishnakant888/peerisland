@@ -560,6 +560,40 @@ def should_run(state: dict, n: int, start: int) -> bool:
         return False
     return True
 
+# ─── Multi-tenant resource-name helpers ──────────────────────────────────────
+
+def _read_tfvar(key: str) -> str:
+    """Parse a single key = "value" line from terraform/terraform.tfvars."""
+    tfvars = REPO_ROOT / "terraform" / "terraform.tfvars"
+    if not tfvars.exists():
+        return ""
+    for line in tfvars.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = line.strip()
+        if line.startswith(key) and "=" in line:
+            # project_name = "peerisland"  →  peerisland
+            val = line.split("=", 1)[1].strip().strip('"').strip("'")
+            return val
+    return ""
+
+
+def _resource_prefix(state: dict) -> str:
+    """Return '{project_name}-{environment}', e.g. 'peerisland-prod'.
+    Reads state first, then falls back to terraform.tfvars, then 'peerisland-prod'."""
+    project = (state["data"].get("project_name")
+               or _read_tfvar("project_name")
+               or "peerisland")
+    env     = (state["data"].get("environment")
+               or _read_tfvar("environment")
+               or "prod")
+    return f"{project}-{env}"
+
+
+def _acr_prefix(state: dict) -> str:
+    """Return ACR name: '{project_name}{environment}acr' (no dashes — ACR name restrictions)."""
+    prefix = _resource_prefix(state).replace("-", "")
+    return f"{prefix}acr"
+
+
 # ═════════════════════════════════════════════════════════════════════════════
 #  PHASE 1 — Pre-flight checks
 # ═════════════════════════════════════════════════════════════════════════════
@@ -1109,10 +1143,11 @@ def phase3_github_secrets(state: dict):
         log("WARN", "Continuing with empty AZURE_CLIENT_ID; update it after terraform apply.")
 
     # ACR / AKS values may not be known yet — set placeholders; phase 4 overwrites them
-    acr_name   = state["data"].get("acr_name",          "peerislandprodacr")
-    acr_server = state["data"].get("acr_login_server",  "peerislandprodacr.azurecr.io")
-    aks_name   = state["data"].get("aks_cluster_name",  "peerisland-prod-aks")
-    aks_rg     = state["data"].get("aks_resource_group","peerisland-prod-rg")
+    _pfx       = _resource_prefix(state)
+    acr_name   = state["data"].get("acr_name",          _acr_prefix(state))
+    acr_server = state["data"].get("acr_login_server",  f"{acr_name}.azurecr.io")
+    aks_name   = state["data"].get("aks_cluster_name",  f"{_pfx}-aks")
+    aks_rg     = state["data"].get("aks_resource_group",f"{_pfx}-rg")
 
     def set_secret(name: str, val: str):
         if not val:
@@ -1343,7 +1378,7 @@ def phase4_terraform(state: dict):
         return outs.get(key, {}).get("value", "") or ""
 
     rg      = tf("resource_group_name")
-    cluster = tf("aks_cluster_name")   or state["data"].get("aks_cluster_name", "peerisland-prod-aks")
+    cluster = tf("aks_cluster_name")   or state["data"].get("aks_cluster_name", f"{_resource_prefix(state)}-aks")
     acr_srv = tf("acr_login_server")   or state["data"].get("acr_login_server", "")
     acr_nm  = tf("acr_name")           or state["data"].get("acr_name", "")
     kv_uri  = tf("key_vault_uri")      or ""
@@ -1399,8 +1434,9 @@ def phase5_kubectl(state: dict):
     phase_header(5, "Configure kubectl")
     for t in ("kubectl", "kubelogin"):
         _require_tool(t)
-    cluster = state["data"].get("aks_cluster_name",  "peerisland-prod-aks")
-    rg      = state["data"].get("aks_resource_group", "peerisland-prod-rg")
+    _pfx    = _resource_prefix(state)
+    cluster = state["data"].get("aks_cluster_name",  f"{_pfx}-aks")
+    rg      = state["data"].get("aks_resource_group", f"{_pfx}-rg")
 
     # Ensure kubelogin is available (AAD-enabled clusters require it)
     if subprocess.run("kubelogin --version", shell=True, capture_output=True).returncode != 0:
@@ -1525,18 +1561,23 @@ def phase7_argocd(state: dict):
     org       = state["data"].get("github_org",  "")
     repo_name = state["data"].get("github_repo", "")
 
-    # Patch placeholder org/repo in ArgoCD YAML files
-    if org and repo_name:
-        for yaml_path in (REPO_ROOT / "argocd").rglob("*.yaml"):
+    # Patch placeholder org/domain in ArgoCD and k8s YAML files.
+    # <YOUR_ORG>   → github_org from state (set in phase 1 from git remote)
+    # <YOUR_DOMAIN> → app_domain from state if set; otherwise left as-is (manual DNS optional)
+    domain = state["data"].get("app_domain", "")
+    yaml_dirs = [REPO_ROOT / "argocd", REPO_ROOT / "k8s"]
+    for yaml_dir in yaml_dirs:
+        for yaml_path in yaml_dir.rglob("*.yaml"):
             text = yaml_path.read_text(encoding="utf-8", errors="replace")
             updated = False
-            for placeholder in ("<YOUR_ORG>", "YOUR_ORG", "your-org"):
-                if placeholder in text:
-                    text    = text.replace(placeholder, org)
-                    updated = True
-            for placeholder in ("<YOUR_REPO>", "YOUR_REPO", "your-repo", "peerisland"):
-                # Only replace standalone placeholders, not the actual project name in paths
-                pass  # repo name is already 'peerisland' in this project
+            if org and repo_name:
+                for placeholder in ("<YOUR_ORG>", "YOUR_ORG", "your-org"):
+                    if placeholder in text:
+                        text    = text.replace(placeholder, org)
+                        updated = True
+            if domain and "<YOUR_DOMAIN>" in text:
+                text    = text.replace("<YOUR_DOMAIN>", domain)
+                updated = True
             if updated:
                 yaml_path.write_text(text, encoding="utf-8")
                 log("OK", f"Patched {yaml_path.relative_to(REPO_ROOT)}")
@@ -1781,8 +1822,9 @@ def _ensure_vcpu_quota(state: dict, vcpus_needed: int = 8):
 
 def _ensure_user_nodes(state: dict):
     """Scale user node pool to 1 if it has 0 nodes — workload pods can't schedule otherwise."""
-    rg      = state["data"].get("aks_resource_group", "peerisland-prod-rg")
-    cluster = state["data"].get("aks_cluster_name",  "peerisland-prod-aks")
+    _pfx    = _resource_prefix(state)
+    rg      = state["data"].get("aks_resource_group", f"{_pfx}-rg")
+    cluster = state["data"].get("aks_cluster_name",  f"{_pfx}-aks")
 
     result = subprocess.run(
         f"az aks nodepool show -g {rg} --cluster-name {cluster} --name user "
@@ -1800,10 +1842,11 @@ def _ensure_user_nodes(state: dict):
         if r.returncode != 0:
             err = (r.stderr or "") + (r.stdout or "")
             if "InsufficientVCPUQuota" in err or "vcpu quota" in err.lower():
+                _loc = state["data"].get("location") or _read_tfvar("location") or "your region"
                 die(
-                    "Azure vCPU quota exhausted in centralindia.\n"
-                    "  → Request more quota: Azure Portal → Subscriptions → "
-                    "Usage + quotas → filter 'centralindia' → "
+                    f"Azure vCPU quota exhausted in {_loc}.\n"
+                    f"  → Request more quota: Azure Portal → Subscriptions → "
+                    f"Usage + quotas → filter '{_loc}' → "
                     "'Standard DSv5 Family vCPUs' → Request increase\n"
                     "  → Or use a smaller VM: set node_pool_vm_size = \"Standard_D2s_v3\" "
                     "in terraform/terraform.tfvars, re-run terraform apply, then bootstrap.py"
@@ -2470,10 +2513,11 @@ def _refresh_github_secrets(state: dict, org: str, repo_name: str):
     client_id = client_id or tf("cicd_client_id")
     tenant_id  = tf("cicd_tenant_id")  or state["data"].get("tenant_id", "")
     sub_id     = tf("cicd_subscription_id") or state["data"].get("subscription_id", "")
-    acr_name   = state["data"].get("acr_name",          "peerislandprodacr")
+    _pfx       = _resource_prefix(state)
+    acr_name   = state["data"].get("acr_name",          _acr_prefix(state))
     acr_server = state["data"].get("acr_login_server",  f"{acr_name}.azurecr.io")
-    aks_name   = state["data"].get("aks_cluster_name",  "peerisland-prod-aks")
-    aks_rg     = state["data"].get("aks_resource_group","peerisland-prod-rg")
+    aks_name   = state["data"].get("aks_cluster_name",  f"{_pfx}-aks")
+    aks_rg     = state["data"].get("aks_resource_group",f"{_pfx}-rg")
 
     slug = f"{org}/{repo_name}"
 
@@ -2515,8 +2559,9 @@ def _refresh_github_secrets(state: dict, org: str, repo_name: str):
         _, tf_obj_id = _tf_cicd_app_ids()
 
         # List all apps with the same display name
+        _cicd_app_name = f"{_resource_prefix(state)}-cicd"
         all_apps_raw = capture(
-            "az ad app list --display-name peerisland-prod-cicd "
+            f"az ad app list --display-name {_cicd_app_name} "
             "--query \"[].{appId:appId,id:id}\" -o json",
             check=False,
         )
@@ -2585,7 +2630,7 @@ def _refresh_github_secrets(state: dict, org: str, repo_name: str):
             # We don't know the new app's object_id yet, so delete by display-name search.
             for existing_app in json.loads(
                 capture(
-                    "az ad app list --display-name peerisland-prod-cicd "
+                    f"az ad app list --display-name {_resource_prefix(state)}-cicd "
                     '--query "[].id" -o json',
                     check=False,
                 ) or "[]"
@@ -2872,8 +2917,9 @@ def _ensure_aks_network_contributor(state: dict):
     if that apply hasn't run yet (or the role was deleted), we apply it directly
     so the LB can be provisioned without waiting for terraform.
     """
-    rg      = state["data"].get("aks_resource_group", "peerisland-prod-rg")
-    cluster = state["data"].get("aks_cluster_name",   "peerisland-prod-aks")
+    _pfx    = _resource_prefix(state)
+    rg      = state["data"].get("aks_resource_group", f"{_pfx}-rg")
+    cluster = state["data"].get("aks_cluster_name",   f"{_pfx}-aks")
 
     # Get the AKS system-assigned MI principal ID
     mi_r = subprocess.run(
@@ -3698,8 +3744,9 @@ def _ensure_kubectl_auth(state: dict):
         log("OK", "kubelogin found in PATH")
 
     # Refresh kubeconfig from AKS
-    rg      = state["data"].get("resource_group", "peerisland-prod-rg")
-    cluster = state["data"].get("aks_cluster_name", "peerisland-prod-aks")
+    _pfx    = _resource_prefix(state)
+    rg      = state["data"].get("resource_group", f"{_pfx}-rg")
+    cluster = state["data"].get("aks_cluster_name", f"{_pfx}-aks")
     r = subprocess.run(
         f"az aks get-credentials -g {rg} -n {cluster} --overwrite-existing",
         shell=True, capture_output=True, text=True,

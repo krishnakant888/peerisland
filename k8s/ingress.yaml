@@ -17,10 +17,10 @@ metadata:
 spec:
   tls:
     - hosts:
-        - peerisland.yourdomain.com
+        - peerisland.<YOUR_DOMAIN>
       secretName: peerisland-tls
   rules:
-    - host: peerisland.yourdomain.com
+    - host: peerisland.<YOUR_DOMAIN>
       http:
         paths:
           # ── active (blue) ─────────────────────────────────────────────────
