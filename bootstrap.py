@@ -1812,6 +1812,24 @@ def phase8_wait_argocd(state: dict):
 #  PHASE 9 — Trigger first build (GitHub Actions)
 # ═════════════════════════════════════════════════════════════════════════════
 
+def _oidc_tf_apply():
+    """Targeted terraform apply to recreate the OIDC federated credential (and app if needed)."""
+    tf_dir = REPO_ROOT / "terraform"
+    log("INFO", "  Running: terraform apply -target=...github_main -auto-approve")
+    rc, out = _tf_stream(
+        "terraform apply "
+        "-target=azuread_application.cicd "
+        "-target=azuread_service_principal.cicd "
+        "-target=azuread_application_federated_identity_credential.github_main "
+        "-auto-approve",
+        str(tf_dir),
+    )
+    if rc != 0:
+        log("WARN", f"  terraform apply failed (exit {rc}): {out[-300:]}")
+    else:
+        log("OK", "  terraform apply succeeded")
+
+
 def _refresh_github_secrets(state: dict, org: str, repo_name: str):
     """Re-push all GitHub Actions secrets and fix the OIDC federated credential.
 
@@ -1903,7 +1921,7 @@ def _refresh_github_secrets(state: dict, org: str, repo_name: str):
     #   repo:ORG@USER_ID/REPO@REPO_ID:ref:refs/heads/main
     # The Azure AD federated credential must match this exactly.
     # Terraform sets the plain form (no IDs); we detect and fix it here.
-    log("INFO", "Verifying Azure AD OIDC federated credential subject …")
+    log("INFO", "Verifying Azure AD OIDC federated credential …")
     try:
         user_id = subprocess.run(
             f"gh api users/{org} --jq .id",
@@ -1918,35 +1936,59 @@ def _refresh_github_secrets(state: dict, org: str, repo_name: str):
             return
 
         correct_subject = f"repo:{org}@{user_id}/{repo_name}@{repo_id}:ref:refs/heads/main"
+        log("INFO", f"  expected subject : {correct_subject}")
 
-        # Use terraform state for the authoritative object ID (not az ad app list)
         _, app_obj_id = _tf_cicd_app_ids()
+        log("INFO", f"  app object ID    : {app_obj_id or '(not found in state)'}")
         if not app_obj_id:
-            log("WARN", "Could not read app object ID from Terraform state — skipping OIDC fix")
-            return
+            log("WARN", "No app object ID in Terraform state — running terraform apply to recreate …")
+            _oidc_tf_apply()
+            _, app_obj_id = _tf_cicd_app_ids()
+            if not app_obj_id:
+                log("WARN", "Still no app after terraform apply — giving up on OIDC fix")
+                return
 
+        # Check the app actually exists in Azure AD (state can be stale)
+        app_check = subprocess.run(
+            f"az ad app show --id {app_obj_id} --query id -o tsv",
+            shell=True, capture_output=True, text=True,
+        )
+        if app_check.returncode != 0:
+            log("WARN",
+                f"  App {app_obj_id} does not exist in Azure AD — Terraform state is stale\n"
+                f"  Removing stale state entries and re-applying …")
+            tf_dir = REPO_ROOT / "terraform"
+            for res in [
+                "azuread_application_federated_identity_credential.github_main",
+                "azuread_service_principal.cicd",
+                "azuread_application.cicd",
+            ]:
+                subprocess.run(
+                    f"terraform state rm {res}",
+                    shell=True, cwd=str(tf_dir), capture_output=True,
+                )
+            _oidc_tf_apply()
+            _, app_obj_id = _tf_cicd_app_ids()
+            if not app_obj_id:
+                log("WARN", "Could not recover app after state cleanup — giving up")
+                return
+            log("OK", f"  App recreated, new object ID: {app_obj_id}")
+
+        # List credentials on the (now-verified) app
         creds_raw = capture(
             f"az ad app federated-credential list --id {app_obj_id} -o json",
             check=False,
         )
+        log("INFO", f"  credential list  : {creds_raw[:120] if creds_raw else '(empty)'}")
         creds = json.loads(creds_raw) if creds_raw.strip().startswith("[") else []
         main_cred = next(
             (c for c in creds if "main" in c.get("subject", "").lower()),
             creds[0] if creds else None,
         )
+
         if not main_cred:
-            log("WARN", "No federated credential on app — re-applying Terraform target to recreate it …")
-            tf_dir = REPO_ROOT / "terraform"
-            rc, _ = _tf_stream(
-                "terraform apply "
-                "-target=azuread_application_federated_identity_credential.github_main "
-                "-auto-approve",
-                str(tf_dir),
-            )
-            if rc != 0:
-                log("WARN", "Targeted terraform apply failed — OIDC credential still missing")
-                return
-            # Re-fetch after apply
+            log("WARN", "  No federated credential found — running targeted terraform apply …")
+            _oidc_tf_apply()
             creds_raw = capture(
                 f"az ad app federated-credential list --id {app_obj_id} -o json",
                 check=False,
@@ -1957,22 +1999,23 @@ def _refresh_github_secrets(state: dict, org: str, repo_name: str):
                 creds[0] if creds else None,
             )
             if not main_cred:
-                log("WARN", "Federated credential still missing after terraform apply")
+                log("WARN", "  Federated credential still missing after terraform apply — OIDC will fail")
                 return
-            log("OK", "Federated credential recreated by Terraform")
+            log("OK", "  Federated credential recreated by Terraform")
 
         current_subject = main_cred.get("subject", "")
+        log("INFO", f"  current subject  : {current_subject}")
+
         if current_subject == correct_subject:
-            log("OK", f"OIDC subject correct: {correct_subject[:70]}")
+            log("OK", "  OIDC subject matches — no fix needed")
             return
 
         log("WARN",
-            f"OIDC subject mismatch — fixing:\n"
+            f"  Subject mismatch — fixing:\n"
             f"    have: {current_subject}\n"
             f"    need: {correct_subject}")
 
         import tempfile as _tmp
-        # Delete + recreate (more reliable than update for cache invalidation)
         subprocess.run(
             f"az ad app federated-credential delete --id {app_obj_id} "
             f"--federated-credential-id {main_cred['id']}",
@@ -1995,13 +2038,13 @@ def _refresh_github_secrets(state: dict, org: str, repo_name: str):
         )
         Path(tmp_path).unlink(missing_ok=True)
         if r.returncode == 0:
-            log("OK", f"OIDC federated credential recreated → {correct_subject[:70]}")
-            log("INFO", "Azure AD takes ~2 min to propagate — workflow will be triggered after a short wait")
+            log("OK", f"  Federated credential recreated → {correct_subject}")
+            log("INFO", "  Waiting 2 min for Azure AD global propagation …")
             time.sleep(120)
         else:
-            log("WARN", f"OIDC credential recreate failed: {(r.stderr or r.stdout)[:120]}")
+            log("WARN", f"  Credential recreate failed: {(r.stderr or r.stdout)[:200]}")
     except Exception as exc:
-        log("WARN", f"OIDC subject check skipped: {exc}")
+        log("WARN", f"OIDC subject check failed: {exc}")
 
 
 def phase9_first_build(state: dict):
