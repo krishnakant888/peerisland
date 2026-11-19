@@ -1313,6 +1313,20 @@ def phase7_argocd(state: dict):
     log("OK", f"grafana-admin-secret ready  →  username: admin  password: {grafana_pass}")
     state["data"]["grafana_admin_password"] = grafana_pass
 
+    # Patch argocd-cm so kustomize overlays can reference parent directories
+    # (k8s/overlays/production → k8s/ traverses an ancestor without this flag)
+    run(
+        "kubectl patch configmap argocd-cm -n argocd --type=merge "
+        '--patch \'{"data":{"kustomize.buildOptions":"--load-restrictor LoadRestrictionsNone"}}\'',
+        check=False,
+    )
+    run("kubectl rollout restart deployment argocd-repo-server -n argocd", check=False)
+    run(
+        "kubectl rollout status deployment argocd-repo-server -n argocd --timeout=120s",
+        check=False,
+    )
+    log("OK", "argocd-cm patched — kustomize load restrictor disabled")
+
     # Apply App of Apps
     run("kubectl apply -f argocd/app-of-apps.yaml")
     log("OK", "App of Apps applied — sync waves starting")
