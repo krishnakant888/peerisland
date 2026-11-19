@@ -1030,12 +1030,56 @@ def _tf_extract_lock_id(output: str) -> str:
 
 
 def _terraform_drift_apply(state: dict):
-    """Run terraform plan on every bootstrap re-run; auto-apply if drift detected (no prompt)."""
+    """Run terraform plan on every bootstrap re-run; auto-apply if drift detected (no prompt).
+
+    Uses the same pre-flight import logic and tf_apply retry loop as phase4_terraform
+    so 409 conflicts and other recoverable errors are handled automatically.
+    """
     tf_dir = REPO_ROOT / "terraform"
     if not (tf_dir / "terraform.tfvars").exists():
         return
     log("INFO", "Checking terraform for infrastructure drift …")
-    # -lock=false is safe for plan (read-only); avoids failing on a stale lock from a prior run
+
+    # Init first so any newly added providers (e.g. helm) are available.
+    init_r = subprocess.run(
+        "terraform init -upgrade",
+        shell=True, cwd=str(tf_dir),
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+    )
+    if init_r.returncode != 0:
+        log("WARN", f"terraform init failed — skipping drift check: {init_r.stderr[:200]}")
+        return
+
+    def _in_state(addr: str) -> bool:
+        r = subprocess.run(f'terraform state show "{addr}"',
+                           shell=True, capture_output=True, cwd=str(tf_dir),
+                           env=os.environ.copy())
+        return r.returncode == 0
+
+    # Pre-flight: adopt the ArgoCD Helm release if bootstrap installed it outside Terraform.
+    if not _in_state("helm_release.argocd"):
+        helm_check = subprocess.run(
+            "helm status argocd -n argocd -o json",
+            shell=True, capture_output=True, text=True, env=os.environ.copy(),
+        )
+        if helm_check.returncode == 0:
+            log("INFO", "Importing existing ArgoCD Helm release into Terraform state …")
+            subprocess.run('terraform import helm_release.argocd "argocd/argocd"',
+                           shell=True, cwd=str(tf_dir), env=os.environ.copy())
+
+    # Pre-flight: adopt federated identity credential that may exist outside Terraform state.
+    if not _in_state("azuread_application_federated_identity_credential.github_main"):
+        import_id = _lookup_federated_credential_import_id(
+            "azuread_application_federated_identity_credential.github_main", tf_dir
+        )
+        if import_id:
+            log("INFO", "Importing existing federated identity credential into Terraform state …")
+            subprocess.run(
+                f'terraform import "azuread_application_federated_identity_credential.github_main" "{import_id}"',
+                shell=True, cwd=str(tf_dir), env=os.environ.copy(),
+            )
+
+    # Plan — exit code 0 = no changes, 1 = error, 2 = changes pending.
     r = subprocess.run(
         "terraform plan -detailed-exitcode -lock=false -out=tfplan",
         shell=True, cwd=str(tf_dir),
@@ -1057,7 +1101,7 @@ def _terraform_drift_apply(state: dict):
                     shell=True, cwd=str(tf_dir),
                     capture_output=True, text=True, encoding="utf-8", errors="replace",
                 )
-                if r.returncode == 1:
+                if r.returncode != 2:
                     log("WARN", f"Terraform plan failed after unlock: {(r.stderr or r.stdout)[:200]}")
                     return
             else:
@@ -1066,37 +1110,42 @@ def _terraform_drift_apply(state: dict):
         else:
             log("WARN", f"Terraform plan failed: {err[:200]}")
             return
-    if r.returncode == 0:
-        log("OK", "Terraform: no changes — infrastructure up to date")
-        return
 
-    # exit code 2 = changes pending — show what will change
+    # exit code 2 = changes pending — show what will change, then apply with retry loop.
     log("WARN", "Terraform drift detected — changes to apply:")
     for line in (r.stdout or "").splitlines():
-        # print resource-change lines and the Plan summary line
         stripped = line.strip()
         if stripped.startswith("#") or stripped.startswith("Plan:") or stripped.startswith("~") or stripped.startswith("+") or stripped.startswith("-"):
             print(f"  {line}")
     print()
 
     log("WARN", "Auto-applying terraform drift …")
-    rc, out = _tf_stream("terraform apply -auto-approve tfplan", str(tf_dir))
-    if rc != 0:
-        if "state blob is already locked" in out.lower() or "error acquiring the state lock" in out.lower():
-            lock_id = _tf_extract_lock_id(out)
-            if lock_id:
-                log("WARN", f"Stale lock on apply (ID: {lock_id}) — force-unlocking and retrying …")
-                subprocess.run(f"terraform force-unlock -force {lock_id}",
-                               shell=True, cwd=str(tf_dir), capture_output=True)
-                rc2, _ = _tf_stream("terraform apply -auto-approve tfplan", str(tf_dir))
-                if rc2 != 0:
-                    log("WARN", "Terraform auto-apply failed after unlock — continuing (manual apply may be needed)")
-                else:
-                    log("OK", "Terraform drift resolved")
+    MAX_DRIFT_ATTEMPTS = 3
+    for attempt in range(1, MAX_DRIFT_ATTEMPTS + 1):
+        try:
+            to_import = tf_apply("tfplan", cwd=tf_dir)
+            if to_import:
+                log("WARN", f"Found {len(to_import)} resource(s) needing import — importing and re-planning …")
+                for tf_addr, azure_id in to_import:
+                    log("INFO", f"  terraform import {tf_addr}")
+                    subprocess.run(f'terraform import "{tf_addr}" "{azure_id}"',
+                                   shell=True, cwd=str(tf_dir), env=os.environ.copy())
+                if attempt == MAX_DRIFT_ATTEMPTS:
+                    log("WARN", "Terraform auto-apply failed after retries — continuing (manual apply may be needed)")
+                    return
+                subprocess.run("terraform plan -out=tfplan", shell=True, cwd=str(tf_dir),
+                               env=os.environ.copy(), capture_output=True)
+                continue
+            log("OK", "Terraform drift resolved")
+            return
+        except SystemExit:
+            if attempt == MAX_DRIFT_ATTEMPTS:
+                log("WARN", "Terraform auto-apply failed — continuing (manual apply may be needed)")
                 return
-        log("WARN", "Terraform auto-apply failed — continuing (manual apply may be needed)")
-    else:
-        log("OK", "Terraform drift resolved")
+            log("WARN", f"Apply failed on attempt {attempt} — re-planning before retry …")
+            time.sleep(5)
+            subprocess.run("terraform plan -out=tfplan", shell=True, cwd=str(tf_dir),
+                           env=os.environ.copy(), capture_output=True)
 
 
 def phase4_terraform(state: dict):
