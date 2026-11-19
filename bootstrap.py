@@ -30,9 +30,14 @@ import base64
 import getpass
 import json
 import os
+import platform
 import subprocess
 import sys
+import tarfile
+import tempfile
 import time
+import urllib.request
+import zipfile
 from datetime import datetime
 from pathlib import Path
 
@@ -224,6 +229,146 @@ def _ensure_tfvars(state: dict):
     input(f"  {yellow('Press Enter once you have reviewed terraform.tfvars…')}")
 
 
+# ── tool auto-installer ───────────────────────────────────────────────────────
+
+_IS_WIN = sys.platform == "win32"
+_TOOLS_DIR = Path(os.environ.get("LOCALAPPDATA", "C:/Users/Public")) / "Programs" / "peerisland-tools"
+
+# Pinned versions — update here to upgrade
+_VERSIONS = {
+    "terraform": "1.9.8",
+    "argocd":    "v2.12.0",
+    "kustomize": "v5.4.3",
+    "kubectl":   "",          # fetched dynamically from dl.k8s.io/release/stable.txt
+}
+
+
+def _fetch(url: str, dest: Path):
+    log("INFO", f"Downloading {url.split('/')[-1]} …")
+    urllib.request.urlretrieve(url, dest)
+
+
+def _add_path_win(d: Path):
+    s = str(d)
+    if s.lower() not in os.environ.get("PATH", "").lower():
+        os.environ["PATH"] = s + os.pathsep + os.environ["PATH"]
+    try:
+        import winreg
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment", 0, winreg.KEY_ALL_ACCESS)
+        cur, _ = winreg.QueryValueEx(key, "PATH")
+        if s.lower() not in cur.lower():
+            winreg.SetValueEx(key, "PATH", 0, winreg.REG_EXPAND_SZ, f"{s};{cur}")
+        winreg.CloseKey(key)
+    except Exception:
+        pass
+
+
+def _kubectl_version() -> str:
+    try:
+        with urllib.request.urlopen("https://dl.k8s.io/release/stable.txt", timeout=10) as r:
+            return r.read().decode().strip()
+    except Exception:
+        return "v1.29.9"
+
+
+def _install_win(tool: str) -> bool:
+    _TOOLS_DIR.mkdir(parents=True, exist_ok=True)
+    _add_path_win(_TOOLS_DIR)
+    try:
+        if tool == "terraform":
+            v = _VERSIONS["terraform"]
+            url = f"https://releases.hashicorp.com/terraform/{v}/terraform_{v}_windows_amd64.zip"
+            with tempfile.TemporaryDirectory() as tmp:
+                z = Path(tmp) / "tf.zip"
+                _fetch(url, z)
+                with zipfile.ZipFile(z) as zf:
+                    zf.extract("terraform.exe", _TOOLS_DIR)
+            log("OK", f"terraform {v} → {_TOOLS_DIR}")
+
+        elif tool == "az":
+            msi = Path(os.environ["TEMP"]) / "azure-cli.msi"
+            _fetch("https://aka.ms/installazurecliwindows", msi)
+            subprocess.run(["msiexec", "/i", str(msi), "/quiet", "/norestart"], check=True)
+            az_wbin = Path("C:/Program Files/Microsoft SDKs/Azure/CLI2/wbin")
+            if az_wbin.exists():
+                _add_path_win(az_wbin)
+            log("OK", "Azure CLI installed")
+
+        elif tool == "kubectl":
+            v = _kubectl_version()
+            url = f"https://dl.k8s.io/release/{v}/bin/windows/amd64/kubectl.exe"
+            _fetch(url, _TOOLS_DIR / "kubectl.exe")
+            log("OK", f"kubectl {v} → {_TOOLS_DIR}")
+
+        elif tool == "argocd":
+            v = _VERSIONS["argocd"]
+            url = f"https://github.com/argoproj/argo-cd/releases/download/{v}/argocd-windows-amd64.exe"
+            _fetch(url, _TOOLS_DIR / "argocd.exe")
+            log("OK", f"argocd {v} → {_TOOLS_DIR}")
+
+        elif tool == "kustomize":
+            v = _VERSIONS["kustomize"]
+            vn = v.lstrip("v")
+            url = (f"https://github.com/kubernetes-sigs/kustomize/releases/download/"
+                   f"kustomize%2F{v}/kustomize_{v}_windows_amd64.tar.gz")
+            with tempfile.TemporaryDirectory() as tmp:
+                tgz = Path(tmp) / "kustomize.tar.gz"
+                _fetch(url, tgz)
+                with tarfile.open(tgz) as tf:
+                    tf.extract("kustomize.exe", _TOOLS_DIR)
+            log("OK", f"kustomize {v} → {_TOOLS_DIR}")
+
+        else:
+            return False
+        return True
+    except Exception as e:
+        log("WARN", f"Auto-install {tool} (Windows) failed: {e}")
+        return False
+
+
+def _install_linux(tool: str) -> bool:
+    def sh(cmd):
+        return subprocess.run(cmd, shell=True, check=True)
+    try:
+        if tool == "terraform":
+            sh("wget -qO- https://apt.releases.hashicorp.com/gpg | "
+               "sudo gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg && "
+               "echo \"deb [signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] "
+               "https://apt.releases.hashicorp.com $(lsb_release -cs) main\" | "
+               "sudo tee /etc/apt/sources.list.d/hashicorp.list >/dev/null && "
+               "sudo apt-get update -qq && sudo apt-get install -y terraform")
+
+        elif tool == "az":
+            sh("curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash")
+
+        elif tool == "kubectl":
+            v = _kubectl_version()
+            sh(f"curl -sLo /tmp/kubectl https://dl.k8s.io/release/{v}/bin/linux/amd64/kubectl && "
+               "chmod +x /tmp/kubectl && sudo mv /tmp/kubectl /usr/local/bin/kubectl")
+
+        elif tool == "argocd":
+            v = _VERSIONS["argocd"]
+            sh(f"curl -sSL -o /tmp/argocd "
+               f"https://github.com/argoproj/argo-cd/releases/download/{v}/argocd-linux-amd64 && "
+               "chmod +x /tmp/argocd && sudo mv /tmp/argocd /usr/local/bin/argocd")
+
+        elif tool == "kustomize":
+            sh("curl -s https://raw.githubusercontent.com/kubernetes-sigs/kustomize/"
+               "master/hack/install_kustomize.sh | sudo bash -s /usr/local/bin")
+
+        else:
+            return False
+        return True
+    except Exception as e:
+        log("WARN", f"Auto-install {tool} (Linux) failed: {e}")
+        return False
+
+
+def _auto_install(tool: str) -> bool:
+    log("INFO", f"Auto-installing {tool} …")
+    return _install_win(tool) if _IS_WIN else _install_linux(tool)
+
+
 def phase1_preflight(state: dict):
     phase_header(1, "Pre-flight checks")
 
@@ -236,16 +381,30 @@ def phase1_preflight(state: dict):
         "git":       "git --version",
         "kustomize": "kustomize version",
     }
-    missing = []
+    # Tools we can install automatically; gh and git must be pre-installed
+    auto_installable = {"terraform", "az", "kubectl", "argocd", "kustomize"}
+
+    still_missing = []
     for tool, cmd in tools.items():
         ok = subprocess.run(cmd, shell=True, capture_output=True).returncode == 0
         if ok:
             log("OK",  f"{tool:12} installed")
+            continue
+        if tool in auto_installable:
+            if _auto_install(tool):
+                ok = subprocess.run(cmd, shell=True, capture_output=True).returncode == 0
+                if ok:
+                    log("OK", f"{tool:12} installed (auto)")
+                    continue
+                log("ERR", f"{tool:12} install succeeded but still not on PATH — open a new terminal and re-run")
+            else:
+                log("ERR", f"{tool:12} auto-install failed")
         else:
-            log("ERR", f"{tool:12} NOT FOUND")
-            missing.append(tool)
-    if missing:
-        die(f"Install missing tools before continuing: {', '.join(missing)}")
+            log("ERR", f"{tool:12} NOT FOUND — install manually and re-run")
+        still_missing.append(tool)
+
+    if still_missing:
+        die(f"Could not install: {', '.join(still_missing)}")
 
     # Azure login
     az_ok = subprocess.run("az account show", shell=True, capture_output=True).returncode == 0
