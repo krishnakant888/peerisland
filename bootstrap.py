@@ -875,6 +875,29 @@ def phase3_github_secrets(state: dict):
 #  PHASE 4 — Provision Azure infra (Terraform)
 # ═════════════════════════════════════════════════════════════════════════════
 
+def _tf_stream(cmd: str, cwd: str):
+    """Run a terraform command, stream output live, return (returncode, combined_output)."""
+    proc = subprocess.Popen(
+        cmd, shell=True, cwd=cwd,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, encoding="utf-8", errors="replace",
+    )
+    lines = []
+    for line in proc.stdout:
+        sys.stdout.write(line)
+        sys.stdout.flush()
+        lines.append(line)
+    proc.wait()
+    return proc.returncode, "".join(lines)
+
+
+def _tf_extract_lock_id(output: str) -> str:
+    for line in output.splitlines():
+        if "ID:" in line:
+            return line.split("ID:")[-1].strip()
+    return ""
+
+
 def _terraform_drift_apply(state: dict):
     """Run terraform plan on every bootstrap re-run; auto-apply if drift detected (no prompt)."""
     tf_dir = REPO_ROOT / "terraform"
@@ -891,31 +914,23 @@ def _terraform_drift_apply(state: dict):
         log("OK", "Terraform: no changes — infrastructure up to date")
         return
     if r.returncode == 1:
-        err = (r.stderr or r.stdout or "")
-        # Try to force-unlock a stale state lock then retry
+        err = r.stderr or r.stdout or ""
         if "state lock" in err.lower() or "already locked" in err.lower():
-            lock_id = ""
-            for line in err.splitlines():
-                if "ID:" in line:
-                    lock_id = line.split("ID:")[-1].strip()
-                    break
+            lock_id = _tf_extract_lock_id(err)
             if lock_id:
-                log("WARN", f"Stale state lock detected (ID: {lock_id}) — force-unlocking …")
+                log("WARN", f"Stale state lock (ID: {lock_id}) — force-unlocking …")
                 subprocess.run(f"terraform force-unlock -force {lock_id}",
                                shell=True, cwd=str(tf_dir), capture_output=True)
-                # Retry plan after unlock
                 r = subprocess.run(
                     "terraform plan -detailed-exitcode -out=tfplan",
                     shell=True, cwd=str(tf_dir),
                     capture_output=True, text=True, encoding="utf-8", errors="replace",
                 )
-                if r.returncode not in (1,):
-                    pass  # fall through to drift check below
-                else:
+                if r.returncode == 1:
                     log("WARN", f"Terraform plan failed after unlock: {(r.stderr or r.stdout)[:200]}")
                     return
             else:
-                log("WARN", f"Terraform plan failed: {err[:200]}")
+                log("WARN", f"Terraform plan failed (lock — no ID found): {err[:200]}")
                 return
         else:
             log("WARN", f"Terraform plan failed: {err[:200]}")
@@ -923,41 +938,32 @@ def _terraform_drift_apply(state: dict):
     if r.returncode == 0:
         log("OK", "Terraform: no changes — infrastructure up to date")
         return
-    # exit code 2 = changes pending
-    log("WARN", "Terraform drift detected — auto-applying …")
-    apply_r = subprocess.run(
-        "terraform apply -auto-approve tfplan",
-        shell=True, cwd=str(tf_dir),
-        capture_output=True, text=True, encoding="utf-8", errors="replace",
-    )
-    if apply_r.stdout:
-        print(apply_r.stdout, end="")
-    if apply_r.returncode != 0:
-        apply_err = apply_r.stderr or apply_r.stdout or ""
-        # apply also hits the lock — extract ID and force-unlock then retry
-        if "state blob is already locked" in apply_err.lower() or "error acquiring the state lock" in apply_err.lower():
-            lock_id = ""
-            for line in apply_err.splitlines():
-                if "ID:" in line:
-                    lock_id = line.split("ID:")[-1].strip()
-                    break
+
+    # exit code 2 = changes pending — show what will change
+    log("WARN", "Terraform drift detected — changes to apply:")
+    for line in (r.stdout or "").splitlines():
+        # print resource-change lines and the Plan summary line
+        stripped = line.strip()
+        if stripped.startswith("#") or stripped.startswith("Plan:") or stripped.startswith("~") or stripped.startswith("+") or stripped.startswith("-"):
+            print(f"  {line}")
+    print()
+
+    log("WARN", "Auto-applying terraform drift …")
+    rc, out = _tf_stream("terraform apply -auto-approve tfplan", str(tf_dir))
+    if rc != 0:
+        if "state blob is already locked" in out.lower() or "error acquiring the state lock" in out.lower():
+            lock_id = _tf_extract_lock_id(out)
             if lock_id:
                 log("WARN", f"Stale lock on apply (ID: {lock_id}) — force-unlocking and retrying …")
                 subprocess.run(f"terraform force-unlock -force {lock_id}",
                                shell=True, cwd=str(tf_dir), capture_output=True)
-                retry_r = subprocess.run(
-                    "terraform apply -auto-approve tfplan",
-                    shell=True, cwd=str(tf_dir),
-                    text=True, encoding="utf-8", errors="replace",
-                )
-                if retry_r.returncode != 0:
+                rc2, _ = _tf_stream("terraform apply -auto-approve tfplan", str(tf_dir))
+                if rc2 != 0:
                     log("WARN", "Terraform auto-apply failed after unlock — continuing (manual apply may be needed)")
                 else:
                     log("OK", "Terraform drift resolved")
                 return
-        log("WARN", f"Terraform auto-apply failed — continuing (manual apply may be needed)")
-        if apply_err:
-            log("WARN", apply_err[:300])
+        log("WARN", "Terraform auto-apply failed — continuing (manual apply may be needed)")
     else:
         log("OK", "Terraform drift resolved")
 
