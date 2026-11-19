@@ -2404,47 +2404,53 @@ def _start_argocd_widget():
         _argocd_widget.start()
 
 
-def _argocd_global_rpc_check_and_fix():
+def _argocd_global_rpc_check_and_fix(wait_healthy: bool = True, timeout: int = 300) -> bool:
     """
-    Detect and fix a global ArgoCD rpc error in one call.
+    Detect and fix a global ArgoCD rpc error, then wait until apps are no longer
+    showing the error (or until *timeout* seconds).
 
     When argocd-repo-server restarts, argocd-application-controller keeps stale
-    gRPC connections → ALL apps show 'rpc error: code = Unavailable / failed to
-    generate manifest'.  Hard-refreshing individual apps does nothing — only
-    restarting the controller clears the stale connections.
+    gRPC connections → ALL apps show 'rpc error: code = Unavailable'.
+    Hard-refreshing individual apps does nothing — only restarting the controller
+    clears the stale connections.
 
-    Safe to call from any phase.  Returns True if a fix was applied.
+    Returns True if a fix was applied.  If wait_healthy=True (default), blocks
+    until the rpc error is gone before returning so callers can proceed safely.
     """
-    r = subprocess.run(
-        "kubectl get applications -n argocd -o json",
-        shell=True, capture_output=True, text=True,
-    )
-    if r.returncode != 0:
-        log("WARN", "kubectl get applications failed — skipping rpc check")
-        return False
+    def _get_items():
+        r = subprocess.run(
+            "kubectl get applications -n argocd -o json",
+            shell=True, capture_output=True, text=True,
+        )
+        if r.returncode != 0:
+            return []
+        try:
+            return json.loads(r.stdout).get("items", [])
+        except Exception:
+            return []
 
-    try:
-        items = json.loads(r.stdout).get("items", [])
-    except Exception:
-        return False
+    def _rpc_count(items):
+        count = 0
+        for a in items:
+            for cond in a.get("status", {}).get("conditions", []):
+                msg = cond.get("message", "").lower()
+                if "rpc" in msg or "failed to generate manifest" in msg or "unavailable" in msg:
+                    count += 1
+                    break
+        return count
 
+    items = _get_items()
     total = len(items)
     if total == 0:
+        log("WARN", "kubectl get applications returned nothing — skipping rpc check")
         return False
 
-    rpc_count = 0
-    for a in items:
-        for cond in a.get("status", {}).get("conditions", []):
-            msg = cond.get("message", "").lower()
-            if "rpc" in msg or "failed to generate manifest" in msg or "unavailable" in msg:
-                rpc_count += 1
-                break
-
-    if rpc_count < max(3, total // 2):
+    rpc = _rpc_count(items)
+    if rpc < max(3, total // 2):
         return False  # not a global issue
 
     log("WARN",
-        f"Global rpc error: {rpc_count}/{total} apps affected — "
+        f"Global rpc error: {rpc}/{total} apps affected — "
         f"restarting argocd-application-controller …")
     subprocess.run(
         "kubectl rollout restart statefulset argocd-application-controller -n argocd",
@@ -2459,8 +2465,25 @@ def _argocd_global_rpc_check_and_fix():
         "argocd.argoproj.io/refresh=hard --overwrite",
         shell=True, capture_output=True,
     )
-    log("OK", "application-controller restarted — waiting 20 s for reconnect …")
+    log("OK", "application-controller restarted — waiting for rpc errors to clear …")
     time.sleep(20)
+
+    if not wait_healthy:
+        return True
+
+    # Poll until rpc errors are gone (or timeout)
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        items = _get_items()
+        rpc = _rpc_count(items)
+        if rpc == 0:
+            log("OK", "rpc errors cleared — all apps re-evaluating")
+            return True
+        remaining = int(deadline - time.time())
+        log("INFO", f"  {rpc}/{len(items)} apps still showing rpc error — waiting … ({remaining}s left)")
+        time.sleep(15)
+
+    log("WARN", f"rpc errors still present after {timeout}s — continuing anyway")
     return True
 
 
@@ -2593,6 +2616,7 @@ def phase9_first_build(state: dict):
 def phase10_rollouts(state: dict):
     phase_header(10, "Watch & promote Rollouts (first deploy)")
     _start_argocd_widget()  # idempotent — already running from phase 9
+    _argocd_global_rpc_check_and_fix()  # ensure controller is healthy before watching rollouts
 
     for svc in ("backend", "frontend"):
         def paused(s=svc):
@@ -2890,9 +2914,22 @@ def main():
 
         # Global rpc check — shared helper used by Phase 8, Phase 9, and here
         if _argocd_global_rpc_check_and_fix():
-            log("OK",
-                "application-controller restarted + all apps hard-refreshed.\n"
-                "  Wait 30 s then re-run:  python bootstrap.py --diagnose")
+            log("OK", "rpc fix applied — re-fetching app status …")
+            # Refresh status table after fix
+            r2 = subprocess.run("kubectl get applications -n argocd -o json",
+                                shell=True, capture_output=True, text=True)
+            if r2.returncode == 0:
+                items2 = json.loads(r2.stdout).get("items", [])
+                status = {a["metadata"]["name"]: a.get("status", {}) for a in items2}
+                print(f"\n  {bold('Updated ArgoCD Status')}")
+                print(f"  {dim(sep)}")
+                for name2, s2 in sorted(status.items()):
+                    sync2   = s2.get("sync",   {}).get("status", "Unknown")
+                    health2 = s2.get("health", {}).get("status", "Unknown")
+                    ok2     = sync2 == "Synced" and health2 in ("Healthy", "Progressing")
+                    icon2   = green("✓") if ok2 else red("✗")
+                    print(f"  {icon2}  {name2:<42}  {dim(sync2 + '/' + health2)}")
+                print(f"  {dim(sep)}\n")
         else:
             # Per-app targeted fixes
             for name, s in status.items():
