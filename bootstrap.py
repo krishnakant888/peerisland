@@ -2752,6 +2752,38 @@ def phase10_rollouts(state: dict):
     _start_argocd_widget()               # idempotent — already running from phase 9
     _argocd_global_rpc_check_and_fix()   # ensure controller is healthy before watching rollouts
 
+    # ── Ensure peerisland namespace exists (ArgoCD may not have synced yet) ───
+    ns_check = subprocess.run(
+        "kubectl get namespace peerisland",
+        shell=True, capture_output=True, text=True,
+    )
+    if ns_check.returncode != 0:
+        log("WARN", "namespace 'peerisland' not found — triggering ArgoCD sync for peerisland app …")
+        subprocess.run(
+            "kubectl annotate application peerisland -n argocd "
+            "argocd.argoproj.io/refresh=hard --overwrite",
+            shell=True, capture_output=True,
+        )
+        subprocess.run(
+            "argocd app sync peerisland --force --async --timeout 60",
+            shell=True, capture_output=True,
+        )
+        log("INFO", "Waiting for 'peerisland' namespace to appear (up to 5 min) …")
+        deadline_ns = time.time() + 300
+        while time.time() < deadline_ns:
+            r = subprocess.run(
+                "kubectl get namespace peerisland",
+                shell=True, capture_output=True, text=True,
+            )
+            if r.returncode == 0:
+                log("OK", "namespace 'peerisland' exists — continuing")
+                break
+            log("INFO", f"  namespace not yet present — waiting … ({int(deadline_ns - time.time())}s left)")
+            time.sleep(15)
+        else:
+            die("namespace 'peerisland' did not appear within 5 min — "
+                "check ArgoCD app 'peerisland' for sync errors (python bootstrap.py --diagnose)")
+
     def _watch_rollout(svc: str, target_phase: str, timeout: int) -> dict:
         """Poll rollout until target_phase, logging every change AND every 30s."""
         log("INFO", f"Watching {svc} Rollout — waiting for phase={target_phase} …")
