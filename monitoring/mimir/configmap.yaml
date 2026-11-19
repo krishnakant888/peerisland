@@ -36,9 +36,8 @@ data:
       tsdb:
         dir: /data/tsdb
 
-    compactor:
-      data_dir: /data/compactor
-      blocks_retention_period: 720h
+    limits:
+      compactor_blocks_retention_period: 720h
 
     ruler_storage:
       backend: filesystem
