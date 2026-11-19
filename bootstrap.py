@@ -1242,9 +1242,17 @@ def _ensure_vcpu_quota(state: dict, vcpus_needed: int = 8):
     new_limit = max(vcpus_needed * 4, 16)
     log("WARN", f"Requesting vCPU quota increase for {family} → {new_limit} in {location} …")
 
-    # Ensure quota extension is installed
+    # Ensure quota extension is installed and Microsoft.Quota provider is registered
     subprocess.run("az extension add --name quota --yes", shell=True,
                    capture_output=True, encoding="utf-8")
+    reg = subprocess.run(
+        "az provider show --namespace Microsoft.Quota --query registrationState -o tsv",
+        shell=True, capture_output=True, text=True, encoding="utf-8",
+    )
+    if reg.stdout.strip().lower() != "registered":
+        log("INFO", "Registering Microsoft.Quota provider (one-time, ~30 s) …")
+        subprocess.run("az provider register --namespace Microsoft.Quota --wait",
+                       shell=True, encoding="utf-8")
 
     scope = f"/subscriptions/{sub_id}/providers/Microsoft.Compute/locations/{location}"
     r = subprocess.run(
