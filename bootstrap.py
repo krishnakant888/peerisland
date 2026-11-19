@@ -1845,92 +1845,139 @@ def _refresh_github_secrets(state: dict, org: str, repo_name: str):
         _set(name, val)
 
     if not client_id:
-        log("WARN",
-            "AZURE_CLIENT_ID still empty — OIDC login will fail.\n"
-            f"  Run: az ad sp list --display-name peerisland-prod-cicd --query [0].appId -o tsv\n"
-            f"  Then: gh secret set AZURE_CLIENT_ID --repo {slug} --body <appId>")
+        log("WARN", "AZURE_CLIENT_ID still empty — Terraform may not have run yet. Re-run after phase 4.")
         return
     log("OK", f"GitHub Actions secrets up to date  (client_id={client_id[:8]}…)")
 
+    # ── Orphan Azure AD app cleanup ───────────────────────────────────────────
+    # Failed Terraform runs create extra apps with the same display name.
+    # az ad app list returns an arbitrary one, most with no federated credential.
+    # Delete all orphans so only the Terraform-managed app remains.
+    log("INFO", "Checking for orphan Azure AD apps …")
+    try:
+        # Get the object ID of the Terraform-managed app from state
+        tf_state_raw = capture(
+            "terraform state show azuread_application.cicd",
+            cwd=tf_dir, check=False,
+        )
+        tf_obj_id = ""
+        for line in tf_state_raw.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("id") and "=" in stripped and len(stripped.split("=")[-1].strip().strip('"')) == 36:
+                tf_obj_id = stripped.split("=")[-1].strip().strip('"')
+                break
+
+        # List all apps with the same display name
+        all_apps_raw = capture(
+            "az ad app list --display-name peerisland-prod-cicd "
+            "--query \"[].{appId:appId,id:id}\" -o json",
+            check=False,
+        )
+        all_apps = json.loads(all_apps_raw) if all_apps_raw.strip().startswith("[") else []
+
+        if len(all_apps) > 1:
+            for app in all_apps:
+                if app["id"] == tf_obj_id:
+                    continue  # keep the Terraform-managed one
+                log("WARN", f"Deleting orphan app {app['appId']} (objectId={app['id']}) …")
+                subprocess.run(
+                    f"az ad app delete --id {app['id']}",
+                    shell=True, capture_output=True,
+                )
+            log("OK", "Orphan apps removed")
+        else:
+            log("OK", f"No orphan apps found ({len(all_apps)} app(s) with this name)")
+    except Exception as exc:
+        log("WARN", f"Orphan cleanup skipped: {exc}")
+
     # ── OIDC federated credential subject fix ────────────────────────────────
-    # GitHub OIDC tokens embed internal numeric IDs:
-    #   repo:ORG@USER_ID/REPO@REPO_ID:ref:refs/heads/BRANCH
-    # The Azure federated credential subject must match exactly.
-    # Terraform sets the plain form; we detect and correct it here.
+    # GitHub OIDC tokens embed internal numeric IDs in the subject claim:
+    #   repo:ORG@USER_ID/REPO@REPO_ID:ref:refs/heads/main
+    # The Azure AD federated credential must match this exactly.
+    # Terraform sets the plain form (no IDs); we detect and fix it here.
     log("INFO", "Verifying Azure AD OIDC federated credential subject …")
     try:
-        user_id_r = subprocess.run(
+        user_id = subprocess.run(
             f"gh api users/{org} --jq .id",
             shell=True, capture_output=True, text=True,
-        )
-        repo_id_r = subprocess.run(
+        ).stdout.strip()
+        repo_id = subprocess.run(
             f"gh api repos/{org}/{repo_name} --jq .id",
             shell=True, capture_output=True, text=True,
-        )
-        user_id = user_id_r.stdout.strip()
-        repo_id = repo_id_r.stdout.strip()
+        ).stdout.strip()
         if not user_id or not repo_id:
             log("WARN", "Could not fetch GitHub user/repo IDs — skipping OIDC subject fix")
             return
 
-        correct_subject = (
-            f"repo:{org}@{user_id}/{repo_name}@{repo_id}:ref:refs/heads/main"
-        )
+        correct_subject = f"repo:{org}@{user_id}/{repo_name}@{repo_id}:ref:refs/heads/main"
 
-        # Get the Azure AD app object ID
-        app_obj_id = capture(
-            "az ad app list --display-name peerisland-prod-cicd --query [0].id -o tsv",
-            check=False,
-        ).strip()
+        # Use terraform state for the authoritative object ID (not az ad app list)
+        tf_state_raw = capture(
+            "terraform state show azuread_application.cicd",
+            cwd=tf_dir, check=False,
+        )
+        app_obj_id = ""
+        for line in tf_state_raw.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("id") and "=" in stripped and len(stripped.split("=")[-1].strip().strip('"')) == 36:
+                app_obj_id = stripped.split("=")[-1].strip().strip('"')
+                break
         if not app_obj_id:
-            log("WARN", "Could not find peerisland-prod-cicd app — skipping OIDC fix")
+            log("WARN", "Could not read app object ID from Terraform state — skipping OIDC fix")
             return
 
-        # List existing federated credentials
         creds_raw = capture(
             f"az ad app federated-credential list --id {app_obj_id} -o json",
             check=False,
         )
         creds = json.loads(creds_raw) if creds_raw.strip().startswith("[") else []
-
-        # Find the main-branch credential and check its subject
         main_cred = next(
-            (c for c in creds if "main" in c.get("name", "").lower()
-             or "main" in c.get("subject", "").lower()),
+            (c for c in creds if "main" in c.get("subject", "").lower()),
             creds[0] if creds else None,
         )
         if not main_cred:
-            log("WARN", "No federated credential found — Terraform may not have applied yet")
+            log("WARN", "No federated credential on app — Terraform may not have applied yet")
             return
 
         current_subject = main_cred.get("subject", "")
-        cred_id = main_cred["id"]
-
         if current_subject == correct_subject:
-            log("OK", f"OIDC subject already correct: {correct_subject[:60]}")
+            log("OK", f"OIDC subject correct: {correct_subject[:70]}")
             return
 
         log("WARN",
-            f"OIDC subject mismatch:\n"
+            f"OIDC subject mismatch — fixing:\n"
             f"    have: {current_subject}\n"
-            f"    need: {correct_subject}\n"
-            f"  Updating …")
+            f"    need: {correct_subject}")
 
         import tempfile as _tmp
+        # Delete + recreate (more reliable than update for cache invalidation)
+        subprocess.run(
+            f"az ad app federated-credential delete --id {app_obj_id} "
+            f"--federated-credential-id {main_cred['id']}",
+            shell=True, capture_output=True,
+        )
         with _tmp.NamedTemporaryFile(mode="w", suffix=".json",
                                      delete=False, encoding="utf-8") as f:
-            json.dump({"subject": correct_subject}, f)
+            json.dump({
+                "name":        main_cred.get("name", "github-main"),
+                "issuer":      "https://token.actions.githubusercontent.com",
+                "subject":     correct_subject,
+                "audiences":   ["api://AzureADTokenExchange"],
+                "description": "GitHub Actions pushes to main branch",
+            }, f)
             tmp_path = f.name
         r = subprocess.run(
-            f'az ad app federated-credential update --id {app_obj_id} '
-            f'--federated-credential-id {cred_id} --parameters "@{tmp_path}"',
+            f"az ad app federated-credential create --id {app_obj_id} "
+            f'--parameters "@{tmp_path}"',
             shell=True, capture_output=True, text=True,
         )
         Path(tmp_path).unlink(missing_ok=True)
         if r.returncode == 0:
-            log("OK", f"OIDC federated credential updated → {correct_subject[:60]}")
+            log("OK", f"OIDC federated credential recreated → {correct_subject[:70]}")
+            log("INFO", "Azure AD takes ~2 min to propagate — workflow will be triggered after a short wait")
+            time.sleep(120)
         else:
-            log("WARN", f"OIDC credential update failed: {(r.stderr or r.stdout)[:120]}")
+            log("WARN", f"OIDC credential recreate failed: {(r.stderr or r.stdout)[:120]}")
     except Exception as exc:
         log("WARN", f"OIDC subject check skipped: {exc}")
 
