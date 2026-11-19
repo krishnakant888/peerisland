@@ -16,10 +16,8 @@ resource "azurerm_kubernetes_cluster" "main" {
 
   local_account_disabled = true
 
-  # Replaces deprecated top-level api_server_authorized_ip_ranges
-  api_server_access_profile {
-    authorized_ip_ranges = length(var.authorized_ip_ranges) > 0 ? var.authorized_ip_ranges : ["0.0.0.0/0"]
-  }
+  # api_server_access_profile requires preview API — use deprecated attribute for 3.x compat
+  api_server_authorized_ip_ranges = length(var.authorized_ip_ranges) > 0 ? var.authorized_ip_ranges : null
 
   default_node_pool {
     name                = "system"
@@ -60,13 +58,6 @@ resource "azurerm_kubernetes_cluster" "main" {
   key_vault_secrets_provider {
     secret_rotation_enabled  = true
     secret_rotation_interval = "2m"
-  }
-
-  maintenance_window {
-    allowed {
-      day   = "Sunday"
-      hours = [2, 4]
-    }
   }
 
   lifecycle {
