@@ -1210,83 +1210,70 @@ def _ensure_vcpu_quota(state: dict, vcpus_needed: int = 8):
     ver    = m.group(4) or ""    # v5 (keep lowercase as Azure expects)
     family = f"standard{series}{suffix}{ver}Family"  # standardDSv5Family
 
-    # ── Check current usage via Compute usages API ────────────────────────────
-    usage_url = (
-        f"https://management.azure.com/subscriptions/{sub_id}"
-        f"/providers/Microsoft.Compute/locations/{location}"
-        f"/usages?api-version=2021-11-01"
-    )
+    # ── Check current usage via az vm list-usage ─────────────────────────────
     cur = subprocess.run(
-        f"az rest --method GET --url \"{usage_url}\"",
+        f"az vm list-usage --location {location} "
+        f"--query \"[?name.value=='{family}'].{{limit:limit,used:currentValue}}\" -o json",
         shell=True, capture_output=True, text=True, encoding="utf-8", errors="replace",
     )
     if cur.returncode == 0:
         try:
-            items = _json.loads(cur.stdout).get("value", [])
-            for item in items:
-                if item.get("name", {}).get("value", "").lower() == family.lower():
-                    used  = item.get("currentValue", 0)
-                    limit = item.get("limit", 0)
-                    avail = int(limit) - int(used)
-                    log("INFO", f"vCPU quota [{family}]: limit={limit}, used={used}, available={avail}")
-                    if avail >= vcpus_needed:
-                        log("OK", f"Sufficient vCPU quota ({avail} free, need {vcpus_needed})")
-                        return
-                    break
+            rows = _json.loads(cur.stdout)
+            if rows:
+                used  = rows[0].get("used", 0)
+                limit = rows[0].get("limit", 0)
+                avail = int(limit) - int(used)
+                log("INFO", f"vCPU quota [{family}]: limit={limit}, used={used}, available={avail}")
+                if avail >= vcpus_needed:
+                    log("OK", f"Sufficient vCPU quota ({avail} free, need {vcpus_needed})")
+                    return
         except Exception:
             pass
 
-    # ── Request increase via Microsoft.Quota API ──────────────────────────────
+    # ── Request increase via az quota extension ───────────────────────────────
     new_limit = max(vcpus_needed * 4, 16)
     log("WARN", f"Requesting vCPU quota increase for {family} → {new_limit} in {location} …")
 
-    quota_url = (
-        f"https://management.azure.com/subscriptions/{sub_id}"
-        f"/providers/Microsoft.Compute/locations/{location}"
-        f"/providers/Microsoft.Quota/quotas/{family}?api-version=2023-02-01"
-    )
+    # Ensure quota extension is installed
+    subprocess.run("az extension add --name quota --yes", shell=True,
+                   capture_output=True, encoding="utf-8")
 
-    with _tmp.NamedTemporaryFile(mode="w", suffix=".json", delete=False, encoding="utf-8") as f:
-        _json.dump({"properties": {"limit": {"limitObjectType": "LimitValue", "value": new_limit},
-                                   "resourceType": "dedicated"}}, f)
-        body_file = f.name
-
+    scope = f"/subscriptions/{sub_id}/providers/Microsoft.Compute/locations/{location}"
     r = subprocess.run(
-        f"az rest --method PUT --url \"{quota_url}\" --body @\"{body_file}\"",
+        f"az quota update --resource-name {family} --scope \"{scope}\" "
+        f"--limit-object limitObjectType=LimitValue value={new_limit} -o json",
         shell=True, capture_output=True, text=True, encoding="utf-8", errors="replace",
     )
-    _os.unlink(body_file)
 
     if r.returncode != 0:
-        log("WARN", f"Quota request failed: {(r.stderr or r.stdout)[:300]}")
-        log("WARN", "Manual fix: Azure Portal → Subscriptions → Usage+quotas → "
-                    f"filter '{location}' → '{family}' → Request increase")
+        log("WARN", f"Quota auto-request failed: {(r.stderr or r.stdout)[:200]}")
+        log("WARN",
+            f"Request manually: https://portal.azure.com/#view/Microsoft_Azure_Capacity/"
+            f"QuotaMenuBlade/~/overview  "
+            f"(filter: location={location}, search: DSv5, request ≥{new_limit} vCPUs)")
         return
 
     try:
         resp   = _json.loads(r.stdout)
         status = resp.get("properties", {}).get("provisioningState", "unknown")
-        log("OK", f"Quota request submitted — provisioningState: {status}")
+        log("OK", f"Quota request submitted — status: {status}")
         if status.lower() in ("succeeded", "created"):
             return
-        # Poll for up to 3 minutes
-        get_url = quota_url.replace("?api-version", "?api-version")
         for _ in range(12):
             _time.sleep(15)
             chk = subprocess.run(
-                f"az rest --method GET --url \"{quota_url}\"",
+                f"az quota show --resource-name {family} --scope \"{scope}\" -o json",
                 shell=True, capture_output=True, text=True, encoding="utf-8",
             )
             if chk.returncode == 0:
                 d   = _json.loads(chk.stdout)
                 lim = d.get("properties", {}).get("limit", {}).get("value", 0)
-                st  = d.get("properties", {}).get("provisioningState", "")
-                if int(lim) >= new_limit or st.lower() == "succeeded":
+                if int(lim) >= new_limit:
                     log("OK", f"Quota approved: {family} = {lim} vCPUs")
                     return
-        log("WARN", "Quota not yet approved — continuing (node provision may still fail)")
+        log("WARN", "Quota pending — continuing (may still fail to provision node)")
     except Exception:
-        log("OK", "Quota request sent")
+        log("OK", "Quota request submitted")
 
 
 def _ensure_user_nodes(state: dict):
