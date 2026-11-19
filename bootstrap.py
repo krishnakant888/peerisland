@@ -206,7 +206,7 @@ def _lookup_federated_credential_import_id(diag_addr: str, cwd: Path) -> str:
     """Return the Terraform import ID for a federated identity credential that
     already exists in Azure AD but is missing from state.
 
-    Import ID format: /applications/{objectId}/federatedIdentityCredentials/{credId}
+    Import ID format: {objectId}/federatedIdentityCredentials/{credId}
     diag_addr example: azuread_application_federated_identity_credential.github_main
     """
     _, app_obj_id = _tf_cicd_app_ids()
@@ -238,7 +238,7 @@ def _lookup_federated_credential_import_id(diag_addr: str, cwd: Path) -> str:
     local_name = diag_addr.split(".")[-1].replace("_", "-")
     for cred in json.loads(creds_raw.stdout or "[]"):
         if cred.get("name") == local_name:
-            return f"/applications/{app_obj_id}/federatedIdentityCredentials/{cred['id']}"
+            return f"{app_obj_id}/federatedIdentityCredentials/{cred['id']}"
 
     log("WARN", f"  No federated credential named '{local_name}' found in Azure AD")
     return ""

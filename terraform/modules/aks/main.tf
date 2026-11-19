@@ -66,9 +66,14 @@ resource "azurerm_kubernetes_cluster" "main" {
       kubernetes_version,
       default_node_pool[0].node_count,
       default_node_pool[0].max_pods,
-      # Set at cluster creation; azurerm 4.x can't rotate the system pool in-place
-      # (requires a VM SKU that may not be available in all regions).
+      # Properties that differ from defaults in azurerm 4.x and would require
+      # temporary_name_for_rotation (which fails if the VM SKU is unavailable).
       default_node_pool[0].only_critical_addons_enabled,
+      default_node_pool[0].host_encryption_enabled,
+      default_node_pool[0].fips_enabled,
+      default_node_pool[0].node_public_ip_enabled,
+      default_node_pool[0].kubelet_config,
+      default_node_pool[0].linux_os_config,
     ]
   }
 }
