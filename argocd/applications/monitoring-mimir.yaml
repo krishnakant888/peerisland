@@ -10,33 +10,14 @@ metadata:
 spec:
   project: default
 
-  # Multi-source: Helm chart from Grafana registry + values file from Git repo
-  # Requires ArgoCD >= 2.6
-  sources:
-    - repoURL: https://grafana.github.io/helm-charts
-      chart: mimir-distributed
-      targetRevision: "5.3.0"
-      helm:
-        valueFiles:
-          - $values/monitoring/mimir-values.yaml
-
-    - repoURL: https://github.com/krishnakant888/peerisland.git
-      targetRevision: HEAD
-      ref: values   # named reference used as $values above
+  source:
+    repoURL: https://github.com/krishnakant888/peerisland.git
+    targetRevision: main
+    path: monitoring/mimir
 
   destination:
     server: https://kubernetes.default.svc
     namespace: monitoring
-
-  ignoreDifferences:
-    - group: apps
-      kind: StatefulSet
-      jsonPointers:
-        - /status/terminatingReplicas
-    - group: apps
-      kind: Deployment
-      jsonPointers:
-        - /status/terminatingReplicas
 
   syncPolicy:
     automated:
@@ -45,4 +26,3 @@ spec:
     syncOptions:
       - CreateNamespace=true
       - ServerSideApply=true
-      - RespectIgnoreDifferences=true
