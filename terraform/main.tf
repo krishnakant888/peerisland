@@ -63,6 +63,7 @@ module "aks" {
   node_subnet_id             = module.networking.aks_subnet_id
   node_pool_vm_size          = var.node_pool_vm_size
   node_pool_min_count        = var.node_pool_min_count
+  user_node_pool_min_count   = var.user_node_pool_min_count
   node_pool_max_count        = var.node_pool_max_count
   admin_group_object_ids     = [azuread_group.aks_admins.object_id]
   authorized_ip_ranges       = var.authorized_ip_ranges

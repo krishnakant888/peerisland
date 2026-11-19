@@ -120,6 +120,8 @@ def run(
         shell=isinstance(cmd, str),
         capture_output=capture,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         cwd=str(cwd or REPO_ROOT),
         env=env or os.environ.copy(),
         input=input_text,
@@ -145,10 +147,13 @@ def _lookup_role_assignment_id(guid_no_dashes: str) -> str:
     fmt = (f"{guid_no_dashes[:8]}-{guid_no_dashes[8:12]}-"
            f"{guid_no_dashes[12:16]}-{guid_no_dashes[16:20]}-{guid_no_dashes[20:]}")
     r = subprocess.run(
-        f"az role assignment show --name {fmt} --query id -o tsv",
-        shell=True, capture_output=True, text=True, env=os.environ.copy(),
+        f"az role assignment list --all --query \"[?name=='{fmt}'].id\" -o tsv",
+        shell=True, capture_output=True, text=True, encoding="utf-8", errors="replace",
+        env=os.environ.copy(),
     )
     return r.stdout.strip() if r.returncode == 0 else ""
+
+
 
 
 def tf_apply(plan_file: str, cwd: Path) -> list[tuple[str, str]]:
@@ -168,12 +173,7 @@ def tf_apply(plan_file: str, cwd: Path) -> list[tuple[str, str]]:
 
     in_progress: dict[str, float] = {}
     created, updated, destroyed = [], [], []
-
-    # Terraform fires "diagnostic" (with error detail + Azure ID) BEFORE
-    # "apply_errored" (with the tf resource address).  We collect the Azure IDs
-    # here and pair them with the address when apply_errored fires.
-    pending_azure_ids: list[str] = []
-    already_exists:    list[tuple[str, str]] = []
+    already_exists: list[tuple[str, str]] = []
 
     action_sym = {
         "create": green("+ create"),
@@ -224,12 +224,6 @@ def tf_apply(plan_file: str, cwd: Path) -> list[tuple[str, str]]:
 
         elif mtype == "apply_errored":
             print(f"  {red('✗')} {addr}  {red('FAILED')}")
-            # Pair all pending Azure IDs (collected from diagnostics) with this addr
-            if addr:
-                for azure_id in pending_azure_ids:
-                    already_exists.append((addr, azure_id))
-                    log("WARN", f"  will auto-import {addr}")
-            pending_azure_ids.clear()
 
         elif mtype == "change_summary":
             changes = msg.get("changes", {})
@@ -239,21 +233,28 @@ def tf_apply(plan_file: str, cwd: Path) -> list[tuple[str, str]]:
                   f"{red(str(changes.get('remove', 0)) + ' destroyed')}")
 
         elif mtype == "diagnostic":
-            diag   = msg.get("diagnostic", {}) or {}
-            detail = diag.get("detail", "") or text
+            diag     = msg.get("diagnostic", {}) or {}
+            # terraform puts the TF resource address directly in diag["address"]
+            diag_addr = diag.get("address", "")
+            # detail is often empty; fall back through summary then @message
+            detail   = (diag.get("detail", "") or diag.get("summary", "") or text)
             if level == "error":
                 print(f"  {red('ERR')} {detail[:300]}")
-                # Case 1: resource already exists — Azure ID is in the error text
-                id_match = re.search(r'"/subscriptions/[^"]+?"', detail)
-                if id_match and re.search(r'already exists', detail, re.IGNORECASE):
-                    pending_azure_ids.append(id_match.group(0).strip('"'))
-                # Case 2: role assignment 409 — derive full ID from bare GUID
-                elif re.search(r'RoleAssignment(Exists|Already)', detail):
-                    guid_match = re.search(r'\b([0-9a-f]{32})\b', detail)
-                    if guid_match:
-                        full_id = _lookup_role_assignment_id(guid_match.group(1))
-                        if full_id:
-                            pending_azure_ids.append(full_id)
+                if diag_addr:
+                    # Case 1: resource already exists — Azure ID in error text
+                    id_match = re.search(r'"/subscriptions/[^"]+?"', detail)
+                    if id_match and re.search(r'already exists', detail, re.IGNORECASE):
+                        azure_id = id_match.group(0).strip('"')
+                        already_exists.append((diag_addr, azure_id))
+                        log("WARN", f"  will auto-import {diag_addr}")
+                    # Case 2: role assignment 409 — look up full resource ID
+                    elif re.search(r'RoleAssignment(Exists|Already)', detail):
+                        guid_match = re.search(r'\b([0-9a-f]{32})\b', detail)
+                        if guid_match:
+                            full_id = _lookup_role_assignment_id(guid_match.group(1))
+                            if full_id:
+                                already_exists.append((diag_addr, full_id))
+                                log("WARN", f"  will auto-import {diag_addr}")
             elif level == "warning":
                 print(f"  {yellow(detail[:200])}")
 
@@ -437,6 +438,29 @@ def _install_win(tool: str) -> bool:
             _fetch(url, _TOOLS_DIR / "kubectl.exe")
             log("OK", f"kubectl {v} → {_TOOLS_DIR}")
 
+        elif tool == "kubelogin":
+            # Download latest kubelogin release for Windows
+            req = urllib.request.Request(
+                "https://api.github.com/repos/Azure/kubelogin/releases/latest",
+                headers={"Accept": "application/vnd.github+json", "User-Agent": "bootstrap.py"},
+            )
+            with urllib.request.urlopen(req, timeout=15) as r:
+                rel = json.loads(r.read())
+            kl_ver = rel["tag_name"]
+            kl_url = next(
+                a["browser_download_url"] for a in rel["assets"]
+                if "windows-amd64.zip" in a["name"]
+            )
+            with tempfile.TemporaryDirectory() as tmp:
+                z = Path(tmp) / "kubelogin.zip"
+                _fetch(kl_url, z)
+                with zipfile.ZipFile(z) as zf:
+                    # asset contains bin/windows_amd64/kubelogin.exe
+                    exe_name = next(n for n in zf.namelist() if n.endswith("kubelogin.exe"))
+                    zf.extract(exe_name, tmp)
+                    Path(tmp, exe_name).rename(_TOOLS_DIR / "kubelogin.exe")
+            log("OK", f"kubelogin {kl_ver} → {_TOOLS_DIR}")
+
         elif tool == "argocd":
             v = _VERSIONS["argocd"]
             url = f"https://github.com/argoproj/argo-cd/releases/download/{v}/argocd-windows-amd64.exe"
@@ -525,6 +549,11 @@ def _install_linux(tool: str) -> bool:
             sh(f"curl -sLo /tmp/kubectl https://dl.k8s.io/release/{v}/bin/linux/amd64/kubectl && "
                "chmod +x /tmp/kubectl && sudo mv /tmp/kubectl /usr/local/bin/kubectl")
 
+        elif tool == "kubelogin":
+            sh("curl -sL https://github.com/Azure/kubelogin/releases/latest/download/kubelogin-linux-amd64.zip "
+               "-o /tmp/kubelogin.zip && unzip -qo /tmp/kubelogin.zip -d /tmp/kubelogin && "
+               "sudo install -m 755 /tmp/kubelogin/bin/linux_amd64/kubelogin /usr/local/bin/kubelogin")
+
         elif tool == "argocd":
             v = _VERSIONS["argocd"]
             sh(f"curl -sSL -o /tmp/argocd "
@@ -587,13 +616,14 @@ def phase1_preflight(state: dict):
         "terraform": "terraform --version",
         "az":        "az version",
         "kubectl":   "kubectl version --client",
+        "kubelogin": "kubelogin --version",
         "argocd":    "argocd version --client",
         "gh":        "gh --version",
         "git":       "git --version",
         "kustomize": "kustomize version",
     }
     # Tools we can install automatically; gh and git must be pre-installed
-    auto_installable = {"terraform", "az", "kubectl", "argocd", "kustomize"}
+    auto_installable = {"terraform", "az", "kubectl", "kubelogin", "argocd", "kustomize"}
 
     still_missing = []
     for tool, cmd in tools.items():
@@ -777,7 +807,7 @@ def phase4_terraform(state: dict):
     run("terraform init -upgrade", cwd=tf_dir)
     run("terraform validate",      cwd=tf_dir)
 
-    MAX_ATTEMPTS = 3
+    MAX_ATTEMPTS = 5
     for attempt in range(1, MAX_ATTEMPTS + 1):
         log("INFO", f"Planning infrastructure (attempt {attempt}/{MAX_ATTEMPTS}) …")
         run("terraform plan -out=tfplan", cwd=tf_dir)
@@ -839,10 +869,11 @@ def phase4_terraform(state: dict):
 
     # Resolve App Gateway public IP from Azure
     log("INFO", "Resolving App Gateway public IP…")
-    appgw_ip = capture(
+    _appgw_lines = capture(
         f"az network public-ip list -g {rg} --query \"[?contains(name,'appgw') || contains(name,'appgateway')].ipAddress\" -o tsv",
         check=False,
-    ).splitlines()[0] if not DRY_RUN else "0.0.0.0"
+    ).strip().splitlines() if not DRY_RUN else ["0.0.0.0"]
+    appgw_ip = _appgw_lines[0] if _appgw_lines else ""
     if appgw_ip:
         log("OK", f"App Gateway IP: {appgw_ip}")
         state["data"]["appgw_ip"] = appgw_ip
@@ -873,7 +904,16 @@ def phase5_kubectl(state: dict):
     cluster = state["data"].get("aks_cluster_name",  "peerisland-prod-aks")
     rg      = state["data"].get("aks_resource_group", "peerisland-prod-rg")
 
+    # Ensure kubelogin is available (AAD-enabled clusters require it)
+    if subprocess.run("kubelogin --version", shell=True, capture_output=True).returncode != 0:
+        log("INFO", "kubelogin not found — installing via az aks install-cli …")
+        run("az aks install-cli")
+        # Rescan PATH — az aks install-cli added dirs to registry but not this process
+        _ensure_tools_on_path()
+
     run(f"az aks get-credentials -g {rg} -n {cluster} --overwrite-existing")
+    # AAD-enabled clusters require kubelogin to exchange az CLI tokens
+    run("kubelogin convert-kubeconfig -l azurecli")
 
     nodes_json = capture("kubectl get nodes -o json")
     items = json.loads(nodes_json).get("items", [])
@@ -906,8 +946,14 @@ def phase6_keyvault(state: dict):
     phase_header(6, "Seed Key Vault secrets")
     kv = state["data"].get("kv_name", "")
 
-    print(f"\n  {yellow('Enter values for each Key Vault secret.')}")
-    print(f"  {dim('Press Enter to skip a secret if it is already set in Key Vault.')}\n")
+    print(f"\n  {yellow('Enter values for Key Vault secrets.')}")
+    print(f"  {dim('Secrets already present in Key Vault are skipped automatically.')}\n")
+
+    # Check which secrets are already in Key Vault
+    _existing_kv = set(capture(
+        f'az keyvault secret list --vault-name {kv} --query "[].name" -o tsv',
+        check=False,
+    ).splitlines())
 
     # The 5 real secrets this platform needs
     secrets_spec = [
@@ -920,8 +966,26 @@ def phase6_keyvault(state: dict):
     ]
 
     for name, prompt, sensitive in secrets_spec:
-        fn  = getpass.getpass if sensitive else input
-        val = fn(f"  {cyan(name)} — {dim(prompt)}: ").strip()
+        if name in _existing_kv:
+            log("OK", f"{name} already in Key Vault — skipping")
+            continue
+        # Resolution order:
+        #   1. env var override      (ARGOCD_GITHUB_TOKEN etc.)
+        #   2. gh auth token         (argocd-github-token only — reuse authenticated session)
+        #   3. interactive prompt    (last resort)
+        env_key = name.upper().replace("-", "_")
+        val = os.environ.get(env_key, "").strip()
+        if val:
+            log("INFO", f"{name}: using env var {env_key}")
+        elif name == "argocd-github-token":
+            val = capture("gh auth token", check=False).strip()
+            if val:
+                log("INFO", "argocd-github-token: using gh CLI session token (has repo scope)")
+            else:
+                log("WARN", "gh auth token returned nothing — run 'gh auth login' first")
+        if not val:
+            fn  = getpass.getpass if sensitive else input
+            val = fn(f"  {cyan(name)} — {dim(prompt)}: ").strip()
         if not val:
             log("INFO", f"Skipped {name}")
             continue
@@ -1009,6 +1073,25 @@ def phase7_argocd(state: dict):
         state["data"]["argocd_password"] = argocd_pw
         log("OK", "ArgoCD initial admin password retrieved")
 
+    # Register GitHub repo credential with ArgoCD using the PAT from Key Vault
+    kv = state["data"].get("kv_name", "")
+    if kv:
+        gh_token = capture(
+            f"az keyvault secret show --vault-name {kv} --name argocd-github-token "
+            f"--query value -o tsv",
+            check=False,
+        ).strip()
+        if gh_token and org and repo_name:
+            repo_url = f"https://github.com/{org}/{repo_name}"
+            run(
+                f"argocd repo add {repo_url} "
+                f"--username git --password {gh_token} --upsert",
+                check=False,
+            )
+            log("OK", f"ArgoCD repo credential registered for {repo_url}")
+        else:
+            log("WARN", "argocd-github-token not found in Key Vault — repo may fail to sync")
+
     # Apply App of Apps
     run("kubectl apply -f argocd/app-of-apps.yaml")
     log("OK", "App of Apps applied — sync waves starting")
@@ -1036,8 +1119,9 @@ def phase8_wait_argocd(state: dict):
     # Expected applications in wave order
     expected = [
         # wave 0
-        "monitoring-alloy-config",
+        "cert-manager", "monitoring-alloy-config",
         # wave 1
+        "cert-manager-config",
         "monitoring-mimir", "monitoring-loki", "monitoring-tempo", "monitoring-alloy",
         # wave 2
         "monitoring-grafana", "monitoring-prometheus-adapter", "argo-rollouts",
@@ -1273,20 +1357,49 @@ def list_phases():
 
 
 def _ensure_tools_on_path():
-    """Add the peerisland-tools dir to PATH at startup so installed tools are found
-    even when running in a session that predates the installation."""
-    if _IS_WIN and _TOOLS_DIR.exists():
-        _add_path_win(_TOOLS_DIR)
-    # az Scripts dir (pip-installed azure-cli)
-    scripts = Path(sys.executable).parent / "Scripts"
-    if _IS_WIN and scripts.exists():
-        s = str(scripts)
-        if s.lower() not in os.environ.get("PATH", "").lower():
-            os.environ["PATH"] = s + os.pathsep + os.environ["PATH"]
+    """Inject all known tool directories into PATH for the current process.
+
+    Covers tools installed in earlier sessions or by external commands (az aks
+    install-cli, pip, our own auto-installer) whose PATH entries only land in the
+    Windows registry and don't reach the current process without a new shell.
+    """
+    extra_dirs: list[Path] = [
+        _TOOLS_DIR,                                   # our own auto-installer
+        Path(sys.executable).parent / "Scripts",      # pip-installed azure-cli
+        Path.home() / ".azure-kubelogin",             # az aks install-cli → kubelogin
+        Path.home() / ".azure-kubectl",               # az aks install-cli → kubectl
+    ]
+    # Also scan ~/.azure-kubelogin subdirs in case the binary is nested (e.g. bin/windows_amd64/)
+    kl_root = Path.home() / ".azure-kubelogin"
+    if kl_root.exists():
+        for sub in kl_root.rglob("kubelogin.exe" if _IS_WIN else "kubelogin"):
+            extra_dirs.append(sub.parent)
+
+    cur_path = os.environ.get("PATH", "").lower()
+    for d in extra_dirs:
+        if d.exists():
+            s = str(d)
+            if s.lower() not in cur_path:
+                os.environ["PATH"] = s + os.pathsep + os.environ["PATH"]
+                cur_path = os.environ["PATH"].lower()
+                if _IS_WIN:
+                    try:
+                        import winreg
+                        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment", 0, winreg.KEY_ALL_ACCESS)
+                        cur, _ = winreg.QueryValueEx(key, "PATH")
+                        if s.lower() not in cur.lower():
+                            winreg.SetValueEx(key, "PATH", 0, winreg.REG_EXPAND_SZ, f"{s};{cur}")
+                        winreg.CloseKey(key)
+                    except Exception:
+                        pass
 
 
 def main():
     global DRY_RUN
+    # Force UTF-8 everywhere — Windows defaults to cp1252 which crashes on
+    # kubectl/argocd output that contains box-drawing or emoji characters.
+    os.environ["PYTHONUTF8"] = "1"
+    os.environ["PYTHONIOENCODING"] = "utf-8"
     _ensure_tools_on_path()
 
     parser = argparse.ArgumentParser(

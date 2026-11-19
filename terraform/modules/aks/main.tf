@@ -86,7 +86,7 @@ resource "azurerm_kubernetes_cluster_node_pool" "user" {
   kubernetes_cluster_id = azurerm_kubernetes_cluster.main.id
   vm_size               = var.node_pool_vm_size
   auto_scaling_enabled  = true
-  min_count             = var.node_pool_min_count
+  min_count             = var.user_node_pool_min_count
   max_count             = var.node_pool_max_count
   vnet_subnet_id        = var.node_subnet_id
   os_disk_type          = "Managed"

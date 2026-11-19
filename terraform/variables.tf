@@ -30,7 +30,7 @@ variable "kubernetes_version" {
 variable "node_pool_vm_size" {
   description = "VM size for node pools. Standard_D4s_v3 (4 vCPU/16GB) is the minimum for LGTM stack + app pods"
   type        = string
-  default     = "Standard_D4s_v3"
+  default     = "Standard_D4s_v5"
 }
 
 variable "deployer_ips" {
@@ -40,9 +40,15 @@ variable "deployer_ips" {
 }
 
 variable "node_pool_min_count" {
-  description = "Minimum number of nodes"
+  description = "Minimum number of nodes for the system node pool"
   type        = number
   default     = 2
+}
+
+variable "user_node_pool_min_count" {
+  description = "Minimum number of nodes for the user node pool (0 = no nodes at creation, scales in when workloads land)"
+  type        = number
+  default     = 0
 }
 
 variable "node_pool_max_count" {
