@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+﻿#!/usr/bin/env bash
 set -euo pipefail
 
 NAMESPACE="argocd"
@@ -28,7 +28,7 @@ echo ""
 echo "==> Registering the GitHub repository"
 echo "    Run after updating your repo URL in argocd/applications/peerisland-app.yaml:"
 echo ""
-echo "    argocd repo add https://github.com/<YOUR_ORG>/peerisland.git \\"
+echo "    argocd repo add https://github.com/krishnakant888/peerisland.git \\"
 echo "      --username <user> --password <token>"
 echo ""
 

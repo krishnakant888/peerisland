@@ -1,4 +1,4 @@
-apiVersion: argoproj.io/v1alpha1
+﻿apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
   name: monitoring-mimir
@@ -20,7 +20,7 @@ spec:
         valueFiles:
           - $values/monitoring/mimir-values.yaml
 
-    - repoURL: https://github.com/<YOUR_ORG>/peerisland.git
+    - repoURL: https://github.com/krishnakant888/peerisland.git
       targetRevision: HEAD
       ref: values   # named reference used as $values above
 

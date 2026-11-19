@@ -1,4 +1,4 @@
-apiVersion: argoproj.io/v1alpha1
+﻿apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
   name: peerisland
@@ -12,9 +12,9 @@ spec:
 
   source:
     # Replace with your actual repository URL
-    repoURL: https://github.com/<YOUR_ORG>/peerisland.git
+    repoURL: https://github.com/krishnakant888/peerisland.git
     targetRevision: main
-    # ArgoCD syncs from the production overlay — the single source of truth
+    # ArgoCD syncs from the production overlay â€” the single source of truth
     path: k8s/overlays/production
 
   destination:

@@ -1,4 +1,4 @@
-groups:
+﻿groups:
   - name: peerisland-backend
     interval: 1m
     rules:
@@ -15,7 +15,7 @@ groups:
         annotations:
           summary: "Backend error rate above 5%"
           description: "Error rate is {{ $value | humanizePercentage }} over the last 5 minutes."
-          runbook: "https://github.com/<YOUR_ORG>/peerisland/wiki/runbooks/backend-errors"
+          runbook: "https://github.com/krishnakant888/peerisland/wiki/runbooks/backend-errors"
 
       - alert: BackendHighP99Latency
         expr: |
@@ -53,5 +53,5 @@ groups:
           severity: warning
           team: platform
         annotations:
-          summary: "Backend HPA at maximum replicas — possible capacity pressure"
+          summary: "Backend HPA at maximum replicas â€” possible capacity pressure"
           description: "HPA has been at maxReplicas ({{ $value }}) for over 10 minutes."

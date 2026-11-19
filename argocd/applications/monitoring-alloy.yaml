@@ -1,4 +1,4 @@
-apiVersion: argoproj.io/v1alpha1
+﻿apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
   name: monitoring-alloy
@@ -18,7 +18,7 @@ spec:
         valueFiles:
           - $values/monitoring/alloy-values.yaml
 
-    - repoURL: https://github.com/<YOUR_ORG>/peerisland.git
+    - repoURL: https://github.com/krishnakant888/peerisland.git
       targetRevision: HEAD
       ref: values
 
@@ -33,7 +33,7 @@ spec:
     syncOptions:
       - CreateNamespace=true
 
-  # Alloy runs as a DaemonSet — replica count is not applicable
+  # Alloy runs as a DaemonSet â€” replica count is not applicable
   ignoreDifferences:
     - group: apps
       kind: DaemonSet

@@ -1,4 +1,4 @@
-apiVersion: argoproj.io/v1alpha1
+﻿apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
   name: monitoring-grafana
@@ -18,12 +18,12 @@ spec:
         valueFiles:
           - $values/monitoring/grafana-values.yaml
         # adminPassword is injected from a Kubernetes Secret at deploy time;
-        # do not set it here — it would be committed to Git in plaintext.
+        # do not set it here â€” it would be committed to Git in plaintext.
         # Create the secret before first sync:
         #   kubectl create secret generic grafana-admin \
         #     --from-literal=admin-password=<value> -n monitoring
 
-    - repoURL: https://github.com/<YOUR_ORG>/peerisland.git
+    - repoURL: https://github.com/krishnakant888/peerisland.git
       targetRevision: HEAD
       ref: values
 
