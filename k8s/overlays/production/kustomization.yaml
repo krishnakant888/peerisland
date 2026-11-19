@@ -3,34 +3,34 @@ kind: Kustomization
 
 # Point to the shared base manifests
 resources:
-  - ../../
+- ../../
 
 # ArgoCD / CI updates these image tags via:
 #   kustomize edit set image PLACEHOLDER_ACR/backend=<acr>/<repo>:<sha>
 images:
-  - name: PLACEHOLDER_ACR/backend
-    newName: peerislandprodacr.azurecr.io/backend
-    newTag: latest
-  - name: PLACEHOLDER_ACR/frontend
-    newName: peerislandprodacr.azurecr.io/frontend
-    newTag: latest
+- name: PLACEHOLDER_ACR/backend
+  newName: peerislandprodacr.azurecr.io/backend
+  newTag: ba1275ac
+- name: PLACEHOLDER_ACR/frontend
+  newName: peerislandprodacr.azurecr.io/frontend
+  newTag: ba1275ac
 
 # Production-specific patches
 patches:
-  - patch: |-
-      - op: replace
-        path: /spec/replicas
-        value: 3
-    target:
-      kind: Rollout
-      name: backend
-  - patch: |-
-      - op: replace
-        path: /spec/replicas
-        value: 3
-    target:
-      kind: Rollout
-      name: frontend
+- patch: |-
+    - op: replace
+      path: /spec/replicas
+      value: 3
+  target:
+    kind: Rollout
+    name: backend
+- patch: |-
+    - op: replace
+      path: /spec/replicas
+      value: 3
+  target:
+    kind: Rollout
+    name: frontend
 
 commonLabels:
   environment: production
