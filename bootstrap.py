@@ -549,6 +549,12 @@ def should_run(state: dict, n: int, start: int) -> bool:
     if n < start:
         log("INFO", dim(f"Phase {n} — skipped (--from {start})"))
         return False
+    # --from N always force-runs phase N even if previously completed.
+    # Phases after N skip normally if already done.
+    if n == start:
+        if n in state["completed"]:
+            log("INFO", dim(f"Phase {n} — re-running (--from {n})"))
+        return True
     if n in state["completed"]:
         log("OK", dim(f"Phase {n} — already completed, skipping"))
         return False
@@ -3804,11 +3810,16 @@ def main():
     log("INFO", f"State→ {STATE_FILE}")
 
     to_run = [args.only] if args.only else list(PHASES.keys())
+    # --only N always force-runs phase N regardless of state (like --from for a single phase)
+    force_run_only = args.only
 
     for n in to_run:
         if n not in PHASES:
             die(f"Unknown phase: {n}")
-        if not should_run(state, n, args.start_from):
+        if force_run_only == n:
+            if n in state["completed"]:
+                log("INFO", dim(f"Phase {n} — re-running (--only {n})"))
+        elif not should_run(state, n, args.start_from):
             # Phase 4 already done: still check for terraform drift and auto-apply
             if n == 4:
                 _terraform_drift_apply(state)
