@@ -2480,14 +2480,7 @@ def _argocd_global_rpc_check_and_fix(wait_healthy: bool = True, timeout: int = 3
 
     log("WARN",
         f"Global rpc error: {rpc}/{total} apps affected — "
-        f"patching ArgoCD resources then restarting argocd-application-controller …")
-
-    # Patch resource limits + repo-server replicas once per session so the OOM
-    # that caused repo-server to restart in the first place doesn't repeat.
-    global _argocd_resources_patched
-    if not _argocd_resources_patched:
-        _ensure_argocd_resources_patched()
-        _argocd_resources_patched = True
+        f"restarting argocd-application-controller …")
 
     subprocess.run(
         "kubectl rollout restart statefulset argocd-application-controller -n argocd",
@@ -2953,6 +2946,12 @@ def main():
         state = load_state()
         _ensure_tools_on_path()
         _ensure_kubectl_auth(state)
+
+        # Apply resource limits + repo-server replicas=2 first so the cluster is
+        # in the right shape before we diagnose / fix apps.  This is safe to run
+        # even when ArgoCD is healthy — helm upgrade is a no-op when nothing changed.
+        _ensure_argocd_resources_patched()
+
         # Build app status table and diagnose
         r = subprocess.run(
             "kubectl get applications -n argocd -o json",
