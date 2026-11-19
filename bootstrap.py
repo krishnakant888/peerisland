@@ -1075,8 +1075,22 @@ def list_phases():
     print()
 
 
+def _ensure_tools_on_path():
+    """Add the peerisland-tools dir to PATH at startup so installed tools are found
+    even when running in a session that predates the installation."""
+    if _IS_WIN and _TOOLS_DIR.exists():
+        _add_path_win(_TOOLS_DIR)
+    # az Scripts dir (pip-installed azure-cli)
+    scripts = Path(sys.executable).parent / "Scripts"
+    if _IS_WIN and scripts.exists():
+        s = str(scripts)
+        if s.lower() not in os.environ.get("PATH", "").lower():
+            os.environ["PATH"] = s + os.pathsep + os.environ["PATH"]
+
+
 def main():
     global DRY_RUN
+    _ensure_tools_on_path()
 
     parser = argparse.ArgumentParser(
         description="PeerIsland end-to-end bootstrap",
