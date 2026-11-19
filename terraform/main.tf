@@ -84,7 +84,6 @@ module "privateendpoints" {
   location            = azurerm_resource_group.main.location
   vnet_id             = module.networking.vnet_id
   pe_subnet_id        = module.networking.pe_subnet_id
-  acr_id              = module.acr.id
   key_vault_id        = module.keyvault.id
   tags                = local.common_tags
 

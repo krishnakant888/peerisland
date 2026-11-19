@@ -1,5 +1,11 @@
+resource "random_string" "kv_suffix" {
+  length  = 4
+  upper   = false
+  special = false
+}
+
 resource "azurerm_key_vault" "main" {
-  name                        = "${var.name_prefix}-kv"
+  name                        = "${var.name_prefix}-kv-${random_string.kv_suffix.result}"
   location                    = var.location
   resource_group_name         = var.resource_group_name
   enabled_for_disk_encryption = true
@@ -13,11 +19,12 @@ resource "azurerm_key_vault" "main" {
   # CKV_AZURE_110: Prevents permanent deletion of vault
   purge_protection_enabled = true
 
-  # CKV_AZURE_109: Block public network access; use private endpoints
-  public_network_access_enabled = false
+  # Public access is restricted to deployer IPs via network_acls below.
+  # Must be true so the deployer can seed secrets from their workstation.
+  public_network_access_enabled = true
 
   # CKV_AZURE_189: Use RBAC instead of access policies for fine-grained control
-  enable_rbac_authorization = true
+  rbac_authorization_enabled = true
 
   network_acls {
     default_action = "Deny"

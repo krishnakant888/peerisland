@@ -20,11 +20,6 @@ variable "pe_subnet_id" {
   type        = string
 }
 
-variable "acr_id" {
-  description = "Resource ID of the Container Registry"
-  type        = string
-}
-
 variable "key_vault_id" {
   description = "Resource ID of the Key Vault"
   type        = string

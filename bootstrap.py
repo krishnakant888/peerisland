@@ -139,6 +139,113 @@ def capture(cmd, **kwargs) -> str:
     return run(cmd, capture=True, **kwargs).stdout.strip()
 
 
+def tf_apply(plan_file: str, cwd: Path) -> list[tuple[str, str]]:
+    """Run terraform apply with live JSON progress.
+    Returns list of (tf_addr, azure_id) for any 'already exists' errors found."""
+    cmd = f"terraform apply -json {plan_file}"
+    log("CMD", cyan(cmd))
+    _fh().write(f"$ {cmd}\n")
+
+    if DRY_RUN:
+        return []
+
+    in_progress: dict[str, float] = {}
+    created, updated, destroyed = [], [], []
+    already_exists: list[tuple[str, str]] = []  # (tf_addr, azure_resource_id)
+    _last_diag_addr = [None]  # track which resource the last diagnostic belongs to
+
+    action_sym = {"create": green("+ create"), "update": yellow("~ update"),
+                  "delete": red("- destroy"), "read": cyan("⟳ read")}
+
+    proc = subprocess.Popen(
+        cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, cwd=str(cwd), env=os.environ.copy(), bufsize=1,
+    )
+
+    for raw in proc.stdout:
+        raw = raw.rstrip()
+        _fh().write(raw + "\n")
+        try:
+            msg = json.loads(raw)
+        except json.JSONDecodeError:
+            if raw.strip():
+                print(f"  {dim(raw)}")
+            continue
+
+        level   = msg.get("@level", "info")
+        text    = msg.get("@message", "")
+        mtype   = msg.get("type", "")
+        hook    = msg.get("hook", {}) or {}
+        res     = hook.get("resource", {}) or {}
+        addr    = res.get("addr", "")
+        action  = hook.get("action", "")
+        elapsed = hook.get("elapsed_seconds", 0)
+
+        if mtype == "apply_start":
+            in_progress[addr] = time.time()
+            _last_diag_addr[0] = addr
+            print(f"  {action_sym.get(action, cyan('⟳'))}  {addr}")
+
+        elif mtype == "apply_progress":
+            print(f"  {action_sym.get(action, cyan('⟳'))}  {addr}  {dim(f'[{int(elapsed)}s elapsed]')}")
+
+        elif mtype == "apply_complete":
+            dur = int(time.time() - in_progress.pop(addr, time.time()))
+            done_sym = green("✓") if action in ("create", "read") else (yellow("✓") if action == "update" else red("✓"))
+            print(f"  {done_sym} {action_sym.get(action, cyan('⟳'))}  {addr}  {dim(f'({dur}s)')}")
+            if   action == "create":  created.append(addr)
+            elif action == "update":  updated.append(addr)
+            elif action == "delete":  destroyed.append(addr)
+
+        elif mtype == "apply_errored":
+            print(f"  {red('✗')} {addr}  {red('FAILED')}")
+            _last_diag_addr[0] = addr
+
+        elif mtype == "change_summary":
+            changes = msg.get("changes", {})
+            print(f"\n  {bold('Apply complete!')}  "
+                  f"{green(str(changes.get('add',0)) + ' added')}  "
+                  f"{yellow(str(changes.get('change',0)) + ' changed')}  "
+                  f"{red(str(changes.get('remove',0)) + ' destroyed')}")
+
+        elif mtype == "diagnostic":
+            diag    = msg.get("diagnostic", {}) or {}
+            detail  = diag.get("detail", "") or text
+            snippet = diag.get("snippet", {}) or {}
+            # Capture resource address from diagnostic snippet
+            if snippet.get("context"):
+                _last_diag_addr[0] = snippet["context"].split(" ")[0] if snippet.get("context") else _last_diag_addr[0]
+            if level == "error":
+                print(f"  {red('ERR')} {detail[:200]}")
+                # Detect "already exists" — extract Azure resource ID
+                if "already exists" in detail:
+                    import re as _re
+                    id_match = _re.search(r'"/subscriptions/[^"]+?"', detail)
+                    if id_match and _last_diag_addr[0]:
+                        azure_id = id_match.group(0).strip('"')
+                        already_exists.append((_last_diag_addr[0], azure_id))
+                        log("WARN", f"Will auto-import: {_last_diag_addr[0]}")
+            elif level == "warning":
+                print(f"  {yellow(detail[:200])}")
+
+    proc.wait()
+
+    if created or updated or destroyed:
+        print(f"\n  {bold(cyan('─── Resources changed ─────────────────────────────'))}")
+        for a in created:   print(f"  {green('+')}  {a}")
+        for a in updated:   print(f"  {yellow('~')}  {a}")
+        for a in destroyed: print(f"  {red('-')}  {a}")
+        print()
+
+    if proc.returncode != 0:
+        if already_exists:
+            return already_exists  # caller will import and retry
+        log("ERR", f"terraform apply failed (exit {proc.returncode})")
+        sys.exit(1)
+
+    return []
+
+
 def wait_for(fn, description: str, timeout: int = 300, interval: int = 10):
     log("INFO", f"Waiting: {description}  (timeout {timeout}s)")
     deadline = time.time() + timeout
@@ -534,8 +641,9 @@ def phase2_bootstrap_tfstate(state: dict):
         mark_done(state, 2)
         return
 
-    run("terraform init",             cwd=tf_boot)
-    run("terraform apply -auto-approve", cwd=tf_boot)
+    run("terraform init",                                cwd=tf_boot)
+    run("terraform plan -out=tfplan_boot -input=false", cwd=tf_boot)
+    tf_apply("tfplan_boot", cwd=tf_boot)
 
     raw = capture("terraform output -json", cwd=tf_boot, check=False)
     if raw:
@@ -637,15 +745,41 @@ def phase4_terraform(state: dict):
     phase_header(4, "Provision Azure infrastructure (Terraform)")
     tf_dir = REPO_ROOT / "terraform"
 
-    run("terraform init -upgrade",     cwd=tf_dir)
-    run("terraform validate",          cwd=tf_dir)
-    run("terraform plan -out=tfplan",  cwd=tf_dir)
+    run("terraform init -upgrade", cwd=tf_dir)
+    run("terraform validate",      cwd=tf_dir)
 
-    confirm = input(f"\n  {yellow('Apply the plan above? [y/N]: ')}").strip().lower()
-    if confirm != "y":
-        die("Terraform apply cancelled")
+    MAX_ATTEMPTS = 3
+    for attempt in range(1, MAX_ATTEMPTS + 1):
+        log("INFO", f"Planning infrastructure (attempt {attempt}/{MAX_ATTEMPTS}) …")
+        run("terraform plan -out=tfplan", cwd=tf_dir)
 
-    run("terraform apply tfplan", cwd=tf_dir)
+        if attempt == 1:
+            confirm = input(f"\n  {yellow('Apply the plan above? [y/N]: ')}").strip().lower()
+            if confirm != "y":
+                die("Terraform apply cancelled")
+        else:
+            log("INFO", f"Auto-retrying after partial failure (attempt {attempt}/{MAX_ATTEMPTS}) …")
+
+        try:
+            to_import = tf_apply("tfplan", cwd=tf_dir)
+            if to_import:
+                # Resources exist in Azure but not in state — import them, then retry
+                log("WARN", f"Found {len(to_import)} resource(s) that exist in Azure but not in state — importing …")
+                for tf_addr, azure_id in to_import:
+                    log("INFO", f"  terraform import {tf_addr}")
+                    run(f'terraform import "{tf_addr}" "{azure_id}"', cwd=tf_dir, check=False)
+                if attempt == MAX_ATTEMPTS:
+                    die("Terraform apply failed after 3 attempts — check errors above")
+                log("INFO", "Import done — re-planning …")
+                time.sleep(3)
+                continue
+            log("OK", "Terraform apply complete.")
+            break  # success
+        except SystemExit:
+            if attempt == MAX_ATTEMPTS:
+                die("Terraform apply failed after 3 attempts — check errors above")
+            log("WARN", f"Apply failed on attempt {attempt} — tainted resources will be replaced on retry …")
+            time.sleep(5)
 
     # Parse outputs
     outs = json.loads(capture("terraform output -json", cwd=tf_dir))
@@ -659,7 +793,7 @@ def phase4_terraform(state: dict):
     acr_nm  = tf("acr_name")           or state["data"].get("acr_name", "")
     kv_uri  = tf("key_vault_uri")      or ""
     # Key Vault name: strip "https://" and ".vault.azure.net/"
-    kv_name = kv_uri.replace("https://", "").rstrip("/").replace(".vault.azure.net", "") if kv_uri else "peerisland-prod-kv"
+    kv_name = kv_uri.replace("https://", "").rstrip("/").replace(".vault.azure.net", "") if kv_uri else state["data"].get("kv_name", "")
 
     state["data"].update({
         "aks_resource_group": rg,
@@ -741,7 +875,7 @@ def phase5_kubectl(state: dict):
 
 def phase6_keyvault(state: dict):
     phase_header(6, "Seed Key Vault secrets")
-    kv = state["data"].get("kv_name", "peerisland-prod-kv")
+    kv = state["data"].get("kv_name", "")
 
     print(f"\n  {yellow('Enter values for each Key Vault secret.')}")
     print(f"  {dim('Press Enter to skip a secret if it is already set in Key Vault.')}\n")

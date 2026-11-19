@@ -23,6 +23,9 @@ resource "azurerm_subnet" "appgw" {
   resource_group_name  = var.resource_group_name
   virtual_network_name = azurerm_virtual_network.main.name
   address_prefixes     = [var.appgw_subnet_cidr]
+
+  # Azure rejects concurrent subnet writes on the same VNet — must be sequential
+  depends_on = [azurerm_subnet.aks]
 }
 
 # Private endpoint NICs land here. Network policies must be disabled
@@ -34,6 +37,8 @@ resource "azurerm_subnet" "pe" {
   address_prefixes     = [var.pe_subnet_cidr]
 
   private_endpoint_network_policies = "Disabled"
+
+  depends_on = [azurerm_subnet.appgw]
 }
 
 resource "azurerm_network_security_group" "aks" {

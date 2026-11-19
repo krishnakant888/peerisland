@@ -12,7 +12,7 @@ variable "environment" {
 variable "location" {
   description = "Azure region"
   type        = string
-  default     = "eastus"
+  default     = "centralindia"
 }
 
 variable "project_name" {
@@ -24,7 +24,7 @@ variable "project_name" {
 variable "kubernetes_version" {
   description = "Kubernetes version for AKS"
   type        = string
-  default     = "1.31"
+  default     = "1.37.1"
 }
 
 variable "node_pool_vm_size" {

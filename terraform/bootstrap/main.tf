@@ -22,7 +22,7 @@ terraform {
   required_providers {
     azurerm = {
       source  = "hashicorp/azurerm"
-      version = "~> 3.90.0"
+      version = "~> 4.0"
     }
     random = {
       source  = "hashicorp/random"
@@ -32,7 +32,13 @@ terraform {
 }
 
 provider "azurerm" {
+  subscription_id = var.subscription_id
   features {}
+}
+
+variable "subscription_id" {
+  type    = string
+  default = "f8bb6fd3-0dce-48c1-a61e-ba1519f2570b"
 }
 
 variable "location" {
@@ -78,7 +84,7 @@ resource "azurerm_storage_account" "tfstate" {
   }
 
   min_tls_version           = "TLS1_2"
-  enable_https_traffic_only = true
+  https_traffic_only_enabled = true
 
   tags = {
     Project   = "peerisland"
@@ -88,9 +94,8 @@ resource "azurerm_storage_account" "tfstate" {
 }
 
 resource "azurerm_storage_container" "tfstate" {
-  name                  = "tfstate"
-  storage_account_name  = azurerm_storage_account.tfstate.name
-  container_access_type = "private"
+  name               = "tfstate"
+  storage_account_id = azurerm_storage_account.tfstate.id
 }
 
 # Grant the current principal Storage Blob Data Owner so Terraform can read/write state
