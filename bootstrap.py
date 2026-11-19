@@ -1971,6 +1971,13 @@ def phase8_wait_argocd(state: dict):
     _ensure_argocd_resources_patched()
 
     # Show current app status so the user can see what ArgoCD sees at the start
+    # Fix any <YOUR_ORG> placeholders left in live Application CRDs before
+    # the sync loop starts — these cause "repository not found" for all apps.
+    _n_fixed = _fix_placeholder_repourls(state)
+    if _n_fixed:
+        log("OK", f"Fixed {_n_fixed} Application repoURL(s) — waiting 15s for re-evaluation …")
+        time.sleep(15)
+
     _print_argocd_status_table("ArgoCD Apps — initial state")
 
     # Print access credentials so the user can log in while sync is in progress
@@ -2144,6 +2151,12 @@ def phase8_wait_argocd(state: dict):
                         log("INFO", f"    condition: {m[:120]}")
             if health_msg:
                 log("INFO", f"    health:    {health_msg[:120]}")
+
+            # ── Fix 0: <YOUR_ORG> placeholder still in repoURL ───────────
+            if ("repository not found" in all_text
+                    or "failed to get git client" in all_text
+                    or "<your_org>" in all_text.lower()):
+                _fix_placeholder_repourls(state)
 
             # ── Fix 1: kustomize path / load-restrictor ───────────────────
             if (not _kustomize_fix_done[0] and (
@@ -3066,6 +3079,64 @@ def _ensure_aks_network_contributor(state: dict):
             f"{(assign_r.stderr or assign_r.stdout)[:200]}")
 
 
+def _fix_placeholder_repourls(state: dict) -> int:
+    """Replace <YOUR_ORG> in live ArgoCD Application repoURLs.
+
+    Returns the number of Applications patched.
+    """
+    org = state["data"].get("github_org", "")
+    if not org:
+        return 0
+    r = subprocess.run(
+        "kubectl get applications -n argocd -o json",
+        shell=True, capture_output=True, text=True,
+    )
+    if r.returncode != 0:
+        return 0
+    try:
+        apps = json.loads(r.stdout).get("items", [])
+    except Exception:
+        return 0
+
+    patched = 0
+    for app in apps:
+        name = app["metadata"]["name"]
+        # single-source
+        src = app.get("spec", {}).get("source", {})
+        if "<YOUR_ORG>" in src.get("repoURL", ""):
+            new_url = src["repoURL"].replace("<YOUR_ORG>", org)
+            subprocess.run(
+                f"kubectl patch application {name} -n argocd --type=json "
+                f"-p '[{{\"op\":\"replace\",\"path\":\"/spec/source/repoURL\","
+                f"\"value\":\"{new_url}\"}}]'",
+                shell=True, capture_output=True,
+            )
+            log("OK", f"Fixed repoURL for {name}: {new_url}")
+            patched += 1
+        # multi-source
+        for i, ms in enumerate(app.get("spec", {}).get("sources", [])):
+            if "<YOUR_ORG>" in ms.get("repoURL", ""):
+                new_url = ms["repoURL"].replace("<YOUR_ORG>", org)
+                subprocess.run(
+                    f"kubectl patch application {name} -n argocd --type=json "
+                    f"-p '[{{\"op\":\"replace\",\"path\":\"/spec/sources/{i}/repoURL\","
+                    f"\"value\":\"{new_url}\"}}]'",
+                    shell=True, capture_output=True,
+                )
+                log("OK", f"Fixed repoURL for {name} source {i}: {new_url}")
+                patched += 1
+
+    if patched:
+        log("INFO", f"Hard-refreshing all apps after repoURL fix …")
+        subprocess.run(
+            "kubectl annotate applications -n argocd --all "
+            "argocd.argoproj.io/refresh=hard --overwrite",
+            shell=True, capture_output=True,
+        )
+        time.sleep(10)
+    return patched
+
+
 def _argocd_ensure_webhook_ignore_patch() -> bool:
     """Patch live argocd-cm so VWC/MWC caBundle drift is permanently ignored.
 
@@ -3933,6 +4004,10 @@ def main():
         state = load_state()
         _ensure_tools_on_path()
         _ensure_kubectl_auth(state)
+        _n = _fix_placeholder_repourls(state)
+        if _n:
+            log("OK", f"Fixed {_n} Application repoURL(s) — waiting 15s …")
+            time.sleep(15)
         _print_argocd_status_table("ArgoCD Apps")
         return
 
