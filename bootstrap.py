@@ -351,6 +351,14 @@ def tf_apply(plan_file: str, cwd: Path) -> list[tuple[str, str]]:
                         if full_id:
                             already_exists.append((diag_addr, full_id))
                             log("WARN", f"  will auto-import {diag_addr}")
+                    # Case 4: AKS temporary pool 400 — VM size not available for rotation.
+                    # The fix is already in Terraform code (only_critical_addons_enabled in
+                    # ignore_changes), so a re-plan will produce a no-op for the AKS cluster.
+                    # Returning an empty already_exists lets the caller's SystemExit handler
+                    # catch this and re-plan, at which point the diff disappears.
+                    elif re.search(r'temporary Agent Pool|temporary_name_for_rotation', detail) and re.search(r'400|Bad Request|not allowed', detail):
+                        log("WARN", f"  AKS temporary pool creation failed (VM size unavailable) — "
+                                     "will re-plan; the ignore_changes fix will suppress this diff.")
             elif level == "warning":
                 print(f"  {yellow(detail[:200])}")
 
@@ -1158,7 +1166,7 @@ def phase4_terraform(state: dict):
         except SystemExit:
             if attempt == MAX_ATTEMPTS:
                 die("Terraform apply failed after 3 attempts — check errors above")
-            log("WARN", f"Apply failed on attempt {attempt} — tainted resources will be replaced on retry …")
+            log("WARN", f"Apply failed on attempt {attempt} — re-planning before retry …")
             time.sleep(5)
 
     # Parse outputs
