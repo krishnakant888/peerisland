@@ -1,3 +1,8 @@
+variable "subscription_id" {
+  description = "Azure subscription ID (required by azurerm 4.x)"
+  type        = string
+}
+
 variable "environment" {
   description = "Environment name"
   type        = string

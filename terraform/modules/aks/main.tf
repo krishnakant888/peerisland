@@ -16,19 +16,20 @@ resource "azurerm_kubernetes_cluster" "main" {
 
   local_account_disabled = true
 
-  # api_server_access_profile requires preview API — use deprecated attribute for 3.x compat
-  api_server_authorized_ip_ranges = length(var.authorized_ip_ranges) > 0 ? var.authorized_ip_ranges : null
+  api_server_access_profile {
+    authorized_ip_ranges = length(var.authorized_ip_ranges) > 0 ? var.authorized_ip_ranges : ["0.0.0.0/0"]
+  }
 
   default_node_pool {
     name                = "system"
     vm_size             = var.node_pool_vm_size
-    enable_auto_scaling = true
-    min_count           = var.node_pool_min_count
-    max_count           = var.node_pool_max_count
-    vnet_subnet_id      = var.node_subnet_id
-    type                = "VirtualMachineScaleSets"
-    os_disk_size_gb     = 128
-    os_disk_type        = "Managed"
+    auto_scaling_enabled = true
+    min_count            = var.node_pool_min_count
+    max_count            = var.node_pool_max_count
+    vnet_subnet_id       = var.node_subnet_id
+    type                 = "VirtualMachineScaleSets"
+    os_disk_size_gb      = 128
+    os_disk_type         = "Managed"
 
     node_labels = {
       "nodepool-type" = "system"
@@ -85,7 +86,7 @@ resource "azurerm_kubernetes_cluster_node_pool" "user" {
   name                  = "user"
   kubernetes_cluster_id = azurerm_kubernetes_cluster.main.id
   vm_size               = var.node_pool_vm_size
-  enable_auto_scaling   = true
+  auto_scaling_enabled  = true
   min_count             = var.node_pool_min_count
   max_count             = var.node_pool_max_count
   vnet_subnet_id        = var.node_subnet_id

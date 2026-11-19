@@ -4,11 +4,11 @@ terraform {
   required_providers {
     azurerm = {
       source  = "hashicorp/azurerm"
-      version = "~> 3.90.0"
+      version = "~> 4.0"
     }
     azuread = {
       source  = "hashicorp/azuread"
-      version = "~> 2.47.0"
+      version = "~> 3.0"
     }
     random = {
       source  = "hashicorp/random"
@@ -20,7 +20,7 @@ terraform {
   # storage_account_name from its output and run: terraform init -reconfigure
   backend "azurerm" {
     resource_group_name  = "peerisland-tfstate-rg"
-    storage_account_name = "REPLACE_WITH_BOOTSTRAP_OUTPUT"
+    storage_account_name = "peerislandtfjncbl7fq"
     container_name       = "tfstate"
     key                  = "peerisland/prod.tfstate"
     use_azuread_auth     = true  # no storage key in environment; uses current AAD identity
@@ -28,13 +28,13 @@ terraform {
 }
 
 provider "azurerm" {
+  # subscription_id sourced from ARM_SUBSCRIPTION_ID env var (set by bootstrap.py)
+  subscription_id = var.subscription_id
+
   features {
     key_vault {
       purge_soft_delete_on_destroy    = false
       recover_soft_deleted_key_vaults = true
-    }
-    resource_group {
-      prevent_deletion_if_contains_resources = true
     }
   }
 }

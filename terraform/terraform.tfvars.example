@@ -1,6 +1,9 @@
 # Copy to terraform.tfvars and fill in real values before running terraform apply.
 # terraform.tfvars is gitignored — never commit it.
 
+# ── Subscription ─────────────────────────────────────────────────────────────
+subscription_id = "your-azure-subscription-id"
+
 # ── Basic config ─────────────────────────────────────────────────────────────
 project_name = "peerisland"
 environment  = "prod"

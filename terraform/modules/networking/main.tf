@@ -33,7 +33,7 @@ resource "azurerm_subnet" "pe" {
   virtual_network_name = azurerm_virtual_network.main.name
   address_prefixes     = [var.pe_subnet_cidr]
 
-  enforce_private_link_endpoint_network_policies = true
+  private_endpoint_network_policies = "Disabled"
 }
 
 resource "azurerm_network_security_group" "aks" {
