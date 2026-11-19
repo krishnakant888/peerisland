@@ -41,6 +41,27 @@ spec:
             default: true
           admissionWebhooks:
             enabled: false
+          extraObjects:
+            - apiVersion: v1
+              kind: Service
+              metadata:
+                name: ingress-nginx-controller-internal
+                namespace: ingress-nginx
+                annotations:
+                  service.beta.kubernetes.io/azure-load-balancer-internal: "true"
+              spec:
+                type: LoadBalancer
+                selector:
+                  app.kubernetes.io/name: ingress-nginx
+                  app.kubernetes.io/instance: ingress-nginx
+                  app.kubernetes.io/component: controller
+                ports:
+                  - name: http
+                    port: 80
+                    targetPort: http
+                  - name: https
+                    port: 443
+                    targetPort: https
 
   destination:
     server: https://kubernetes.default.svc
