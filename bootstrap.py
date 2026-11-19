@@ -1200,12 +1200,24 @@ def _ensure_user_nodes(state: dict):
     count = result.stdout.strip()
     if count == "0" or count == "":
         log("WARN", "User node pool has 0 nodes — bumping min-count to 1 so autoscaler provisions a node …")
-        subprocess.run(
+        r = subprocess.run(
             f"az aks nodepool update -g {rg} --cluster-name {cluster} "
             f"--name user --update-cluster-autoscaler --min-count 1 --max-count 5",
-            shell=True, check=True, encoding="utf-8", errors="replace",
+            shell=True, capture_output=True, text=True, encoding="utf-8", errors="replace",
         )
-        log("OK", "User node pool scaled to 1 — waiting for node to be Ready …")
+        if r.returncode != 0:
+            err = (r.stderr or "") + (r.stdout or "")
+            if "InsufficientVCPUQuota" in err or "vcpu quota" in err.lower():
+                die(
+                    "Azure vCPU quota exhausted in centralindia.\n"
+                    "  → Request more quota: Azure Portal → Subscriptions → "
+                    "Usage + quotas → filter 'centralindia' → "
+                    "'Standard DSv5 Family vCPUs' → Request increase\n"
+                    "  → Or use a smaller VM: set node_pool_vm_size = \"Standard_D2s_v3\" "
+                    "in terraform/terraform.tfvars, re-run terraform apply, then bootstrap.py"
+                )
+            raise subprocess.CalledProcessError(r.returncode, r.args, r.stdout, r.stderr)
+        log("OK", "User node pool min-count bumped — waiting for node to be Ready …")
         # Wait up to 5 minutes for the new node
         def node_ready():
             r = subprocess.run(
