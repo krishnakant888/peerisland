@@ -1325,7 +1325,15 @@ def phase7_argocd(state: dict):
         "kubectl rollout status deployment argocd-repo-server -n argocd --timeout=120s",
         check=False,
     )
-    log("OK", "argocd-cm patched — kustomize load restrictor disabled")
+    run(
+        "kubectl rollout restart statefulset argocd-application-controller -n argocd",
+        check=False,
+    )
+    run(
+        "kubectl rollout status statefulset argocd-application-controller -n argocd --timeout=180s",
+        check=False,
+    )
+    log("OK", "argocd-cm patched — repo-server + app-controller restarted")
 
     # Apply App of Apps
     run("kubectl apply -f argocd/app-of-apps.yaml")
@@ -1552,18 +1560,29 @@ def phase8_wait_argocd(state: dict):
             "kubectl rollout status deployment argocd-repo-server -n argocd --timeout=120s",
             shell=True,
         )
-        log("OK", "argocd-repo-server restarted with kustomize load-restrictor fix")
+        # app-controller holds gRPC connections to repo-server pod by IP;
+        # after repo-server restarts the old connections go stale → all apps
+        # show "rpc" errors until app-controller reconnects.  Restart it now.
+        subprocess.run(
+            "kubectl rollout restart statefulset argocd-application-controller -n argocd",
+            shell=True, capture_output=True,
+        )
+        subprocess.run(
+            "kubectl rollout status statefulset argocd-application-controller -n argocd --timeout=180s",
+            shell=True,
+        )
+        log("OK", "argocd-repo-server + application-controller restarted")
     else:
         log("OK", "argocd-cm kustomize.buildOptions already set — OK")
 
-    # Hard-refresh peerisland-app so repo-server re-evaluates after patch
+    # Hard-refresh all apps so app-controller re-evaluates with fresh connections
     subprocess.run(
-        "kubectl annotate application peerisland-app -n argocd "
+        "kubectl annotate applications -n argocd --all "
         "argocd.argoproj.io/refresh=hard --overwrite",
         shell=True, capture_output=True,
     )
-    log("INFO", "Hard-refreshed peerisland-app — waiting 15s for re-evaluation …")
-    time.sleep(15)
+    log("INFO", "Hard-refreshed all apps — waiting 20s for re-evaluation …")
+    time.sleep(20)
 
     # Expected applications in wave order
     expected = [
