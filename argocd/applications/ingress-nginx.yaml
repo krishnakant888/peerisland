@@ -26,9 +26,7 @@ spec:
               cpu: 500m
               memory: 256Mi
           service:
-            annotations:
-              # Internal Azure Load Balancer — accessible only within the VNet
-              service.beta.kubernetes.io/azure-load-balancer-internal: "true"
+            annotations: {}
           ingressClassResource:
             name: nginx
             enabled: true

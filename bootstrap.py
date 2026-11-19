@@ -1208,6 +1208,7 @@ def phase8_wait_argocd(state: dict):
         "cert-manager-config", "ingress-nginx",
         "monitoring-mimir", "monitoring-loki", "monitoring-tempo", "monitoring-alloy",
         # wave 2
+        "ingresses",
         "monitoring-grafana", "monitoring-prometheus-adapter", "argo-rollouts",
         # wave 3
         "peerisland-app",
