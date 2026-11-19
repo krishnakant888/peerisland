@@ -1614,6 +1614,65 @@ def phase7_argocd(state: dict):
             yaml_path.write_text(text, encoding="utf-8")
             log("OK", f"Patched {yaml_path.relative_to(REPO_ROOT)}")
 
+    # Commit and push all patched YAML files so ArgoCD reads the correct repoURLs.
+    # ArgoCD syncs from git — local-only patches are invisible to it.
+    _git_status = subprocess.run(
+        "git status --porcelain argocd/ k8s/",
+        shell=True, capture_output=True, text=True, cwd=str(REPO_ROOT),
+    ).stdout.strip()
+    if _git_status:
+        log("INFO", "Committing patched YAML files so ArgoCD can read them …")
+        subprocess.run("git add argocd/ k8s/",
+                       shell=True, cwd=str(REPO_ROOT))
+        subprocess.run(
+            'git commit -m "bootstrap: apply org/hostname/email placeholders [skip ci]"',
+            shell=True, cwd=str(REPO_ROOT),
+        )
+        push_r = subprocess.run(
+            "git push", shell=True, capture_output=True, text=True, cwd=str(REPO_ROOT),
+        )
+        if push_r.returncode == 0:
+            log("OK", "Pushed patched YAMLs to git")
+        else:
+            log("WARN", f"git push failed: {push_r.stderr.strip()[:200]}")
+            log("WARN", "ArgoCD may still see placeholder repoURLs — push manually and re-run")
+    else:
+        log("OK", "YAML files already up to date in git")
+
+    # Fix any live ArgoCD Application CRDs that still have placeholder repoURLs.
+    # This happens when Phase 7 re-runs after a previous run left stale objects.
+    if org:
+        _apps_json = subprocess.run(
+            "kubectl get applications -n argocd -o json",
+            shell=True, capture_output=True, text=True,
+        )
+        if _apps_json.returncode == 0:
+            try:
+                _apps = json.loads(_apps_json.stdout).get("items", [])
+                for _app in _apps:
+                    _app_name = _app["metadata"]["name"]
+                    _sources  = []
+                    # single-source
+                    _src = _app.get("spec", {}).get("source", {})
+                    if _src.get("repoURL", "").count("<YOUR_ORG>"):
+                        _sources.append(("source", _src))
+                    # multi-source
+                    for _i, _ms in enumerate(_app.get("spec", {}).get("sources", [])):
+                        if _ms.get("repoURL", "").count("<YOUR_ORG>"):
+                            _sources.append((f"sources/{_i}", _ms))
+                    for _path_key, _src in _sources:
+                        _new_url = _src["repoURL"].replace("<YOUR_ORG>", org)
+                        subprocess.run(
+                            f"kubectl patch application {_app_name} -n argocd --type=json "
+                            f"-p '[{{\"op\":\"replace\","
+                            f"\"path\":\"/spec/{_path_key}/repoURL\","
+                            f"\"value\":\"{_new_url}\"}}]'",
+                            shell=True, capture_output=True,
+                        )
+                        log("OK", f"Patched live repoURL for {_app_name}: {_new_url}")
+            except Exception as _e:
+                log("WARN", f"Live Application patch skipped: {_e}")
+
     # Install ArgoCD via Helm (matches install-argocd.sh but cross-platform)
     argocd_values = REPO_ROOT / "argocd" / "argocd-values.yaml"
     run("kubectl create namespace argocd --dry-run=client -o yaml | kubectl apply -f -")
