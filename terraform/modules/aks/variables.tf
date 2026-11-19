@@ -73,6 +73,11 @@ variable "log_analytics_workspace_id" {
   type = string
 }
 
+variable "vnet_id" {
+  description = "ID of the VNet where the AKS cluster is deployed; used to grant the cluster identity Network Contributor for LoadBalancer provisioning."
+  type        = string
+}
+
 variable "tags" {
   type    = map(string)
   default = {}

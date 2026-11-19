@@ -72,6 +72,7 @@ module "aks" {
   acr_id                     = module.acr.id
   key_vault_id               = module.keyvault.id
   log_analytics_workspace_id = azurerm_log_analytics_workspace.main.id
+  vnet_id                    = module.networking.vnet_id
   tags                       = local.common_tags
 
   depends_on = [module.networking, module.acr]

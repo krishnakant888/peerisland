@@ -89,6 +89,13 @@ resource "azurerm_role_assignment" "aks_kv_secrets_user" {
   scope                = var.key_vault_id
 }
 
+resource "azurerm_role_assignment" "aks_vnet_network_contributor" {
+  principal_id                     = azurerm_kubernetes_cluster.main.identity[0].principal_id
+  role_definition_name             = "Network Contributor"
+  scope                            = var.vnet_id
+  skip_service_principal_aad_check = true
+}
+
 resource "azurerm_kubernetes_cluster_node_pool" "user" {
   name                        = "user"
   temporary_name_for_rotation = "usertmp"
