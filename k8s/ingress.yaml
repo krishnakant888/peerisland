@@ -18,10 +18,10 @@ metadata:
 spec:
   tls:
     - hosts:
-        - <YOUR_APP_HOST>
+        - peerisland.centralindia.cloudapp.azure.com
       secretName: peerisland-tls
   rules:
-    - host: <YOUR_APP_HOST>
+    - host: peerisland.centralindia.cloudapp.azure.com
       http:
         paths:
           # ── active (blue) ─────────────────────────────────────────────────

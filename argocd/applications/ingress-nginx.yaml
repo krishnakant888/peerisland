@@ -33,7 +33,7 @@ spec:
               memory: 256Mi
           service:
             annotations:
-              service.beta.kubernetes.io/azure-dns-label-name: "<YOUR_DNS_LABEL>"
+              service.beta.kubernetes.io/azure-dns-label-name: "peerisland"
           ingressClassResource:
             name: nginx
             enabled: true

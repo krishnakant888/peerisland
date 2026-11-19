@@ -14,7 +14,7 @@ metadata:
 spec:
   acme:
     server: https://acme-v02.api.letsencrypt.org/directory
-    email: <LETSENCRYPT_EMAIL>
+    email: krishnakant888@gmail.com
     privateKeySecretRef:
       name: letsencrypt-account-key
     solvers:
