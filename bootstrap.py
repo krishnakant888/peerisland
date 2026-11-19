@@ -1574,6 +1574,45 @@ def phase7_argocd(state: dict):
                 yaml_path.write_text(text, encoding="utf-8")
                 log("OK", f"Patched {yaml_path.relative_to(REPO_ROOT)}")
 
+    # Compute Azure public DNS hostname and patch placeholders
+    # Hostname: {project_name}.{location}.cloudapp.azure.com (Azure-provided, no zone needed)
+    _project  = _read_tfvar("project_name") or state["data"].get("project_name", "peerisland")
+    _location = _read_tfvar("location")     or state["data"].get("location", "eastus")
+    _dns_label   = _project.lower()
+    _app_hostname = f"{_dns_label}.{_location}.cloudapp.azure.com"
+    state["data"]["app_hostname"] = _app_hostname
+    state["data"]["dns_label"]    = _dns_label
+    save_state(state)
+    log("OK", f"App hostname: {_app_hostname}")
+
+    # Resolve Let's Encrypt email: gh CLI → prompt
+    _le_email = state["data"].get("letsencrypt_email", "")
+    if not _le_email:
+        _le_email = capture("gh api user --jq .email", check=False).strip()
+    if not _le_email:
+        _le_email = input(f"  {cyan('Email for Let'\''s Encrypt expiry notices')}: ").strip()
+    if _le_email:
+        state["data"]["letsencrypt_email"] = _le_email
+        save_state(state)
+
+    # Patch <YOUR_DNS_LABEL>, <YOUR_APP_HOST>, <LETSENCRYPT_EMAIL> in YAML files
+    _patch_targets = list((REPO_ROOT / "argocd").rglob("*.yaml")) + \
+                     list((REPO_ROOT / "k8s").rglob("*.yaml"))
+    for yaml_path in _patch_targets:
+        text = yaml_path.read_text(encoding="utf-8", errors="replace")
+        updated = False
+        for src, dst in [
+            ("<YOUR_DNS_LABEL>",    _dns_label),
+            ("<YOUR_APP_HOST>",     _app_hostname),
+            ("<LETSENCRYPT_EMAIL>", _le_email or "<LETSENCRYPT_EMAIL>"),
+        ]:
+            if src in text and dst != src:
+                text    = text.replace(src, dst)
+                updated = True
+        if updated:
+            yaml_path.write_text(text, encoding="utf-8")
+            log("OK", f"Patched {yaml_path.relative_to(REPO_ROOT)}")
+
     # Install ArgoCD via Helm (matches install-argocd.sh but cross-platform)
     argocd_values = REPO_ROOT / "argocd" / "argocd-values.yaml"
     run("kubectl create namespace argocd --dry-run=client -o yaml | kubectl apply -f -")
@@ -3569,7 +3608,9 @@ def phase11_summary(state: dict):
             ip = "<appgw-public-ip>"
             log("WARN", "nginx LB IP not yet assigned — run 'python bootstrap.py --from 8' after AKS provisions it")
 
-    base = f"https://{ip}"
+    # Prefer hostname over raw IP for URLs
+    hostname = state["data"].get("app_hostname", "")
+    base = f"https://{hostname}" if hostname else f"https://{ip}"
 
     # ── ArgoCD password ───────────────────────────────────────────────────────
     argocd_pw = state["data"].get("argocd_password", "")

@@ -32,7 +32,8 @@ spec:
               cpu: 500m
               memory: 256Mi
           service:
-            annotations: {}
+            annotations:
+              service.beta.kubernetes.io/azure-dns-label-name: "<YOUR_DNS_LABEL>"
           ingressClassResource:
             name: nginx
             enabled: true

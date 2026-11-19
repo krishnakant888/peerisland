@@ -5,6 +5,23 @@ metadata:
 spec:
   selfSigned: {}
 ---
+# Let's Encrypt — HTTP-01 via ingress-nginx. Requires the LB to be publicly
+# reachable on port 80 (nginx-ingress-controller handles the challenge path).
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt
+spec:
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+    email: <LETSENCRYPT_EMAIL>
+    privateKeySecretRef:
+      name: letsencrypt-account-key
+    solvers:
+      - http01:
+          ingress:
+            ingressClassName: nginx
+---
 # Self-signed CA certificate — cert-manager uses this as the root CA
 # for all internal services. Add cert-manager.io/cluster-issuer: "selfsigned"
 # annotation to any Ingress to get a TLS cert issued automatically.
