@@ -2723,8 +2723,9 @@ def phase9_first_build(state: dict):
 
 def _rollout_status_summary(svc: str) -> dict:
     """Return a dict with phase, desired, ready, available, message from the Rollout."""
+    # Plain kubectl -o json — the argo rollouts plugin does not support -o json
     r = subprocess.run(
-        f"kubectl argo rollouts get rollout {svc} -n peerisland -o json",
+        f"kubectl get rollout {svc} -n peerisland -o json",
         shell=True, capture_output=True, text=True,
     )
     if r.returncode != 0 or not r.stdout.strip():
