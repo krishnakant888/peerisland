@@ -183,7 +183,6 @@ def tf_apply(plan_file: str, cwd: Path) -> list[tuple[str, str]]:
 
         if mtype == "apply_start":
             in_progress[addr] = time.time()
-            _last_diag_addr[0] = addr
             print(f"  {action_sym.get(action, cyan('⟳'))}  {addr}")
 
         elif mtype == "apply_progress":
