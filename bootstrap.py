@@ -2663,7 +2663,6 @@ def _print_access_summary(state: dict):
 
 def phase9_first_build(state: dict):
     phase_header(9, "Trigger first build via GitHub Actions")
-    _start_argocd_widget()
     org       = state["data"].get("github_org",  "")
     repo_name = state["data"].get("github_repo", "")
     slug      = f"{org}/{repo_name}"
@@ -2748,9 +2747,8 @@ def _rollout_status_summary(svc: str) -> dict:
 def phase10_rollouts(state: dict):
     phase_header(10, "Watch & promote Rollouts (first deploy)")
     _require_tool("kubectl-argo-rollouts")
-    _ensure_kubectl_auth(state)          # re-auth if session expired since Phase 8
-    _start_argocd_widget()               # idempotent — already running from phase 9
-    _argocd_global_rpc_check_and_fix()   # ensure controller is healthy before watching rollouts
+    _ensure_kubectl_auth(state)
+    _argocd_global_rpc_check_and_fix()
 
     # ── Ensure peerisland namespace exists (ArgoCD may not have synced yet) ───
     ns_check = subprocess.run(
@@ -2830,7 +2828,6 @@ def phase10_rollouts(state: dict):
 
 def phase11_summary(state: dict):
     phase_header(11, "Bootstrap complete")
-    _start_argocd_widget()
 
     ip          = state["data"].get("appgw_ip", "<appgw-public-ip>")
     base        = f"https://{ip}"
