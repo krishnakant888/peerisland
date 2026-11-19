@@ -40,12 +40,8 @@ app.use((req, res, next) => {
     const span = trace.getActiveSpan();
     const traceId = span?.spanContext().traceId;
     httpRequestsTotal.inc(labels);
-    if (traceId) {
-      end({ ...labels, exemplarLabels: { traceId } });
-      res.setHeader('X-Trace-Id', traceId);
-    } else {
-      end(labels);
-    }
+    end(labels);
+    if (traceId) res.setHeader('X-Trace-Id', traceId);
   });
   next();
 });
