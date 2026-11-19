@@ -26,6 +26,16 @@ spec:
     server: https://kubernetes.default.svc
     namespace: monitoring
 
+  ignoreDifferences:
+    - group: apps
+      kind: StatefulSet
+      jsonPointers:
+        - /spec/volumeClaimTemplates
+    - group: ""
+      kind: ServiceAccount
+      jsonPointers:
+        - /metadata/annotations
+
   syncPolicy:
     automated:
       prune: true
@@ -33,3 +43,4 @@ spec:
     syncOptions:
       - CreateNamespace=true
       - ServerSideApply=true
+      - RespectIgnoreDifferences=true

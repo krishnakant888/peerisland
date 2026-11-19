@@ -1530,15 +1530,41 @@ def phase8_wait_argocd(state: dict):
         "peerisland-app",
     ]
 
-    def all_healthy():
+    def _argocd_app_status():
         r = subprocess.run(
             "kubectl get applications -n argocd -o json",
             shell=True, capture_output=True, text=True,
         )
         if r.returncode != 0:
+            return {}
+        try:
+            items = json.loads(r.stdout).get("items", [])
+        except Exception:
+            return {}
+        return {a["metadata"]["name"]: a.get("status", {}) for a in items}
+
+    def _force_sync_stuck(status: dict):
+        """Force-refresh and sync apps that are Unknown or OutOfSync."""
+        for name in expected:
+            s      = status.get(name, {})
+            sync   = s.get("sync",   {}).get("status", "Unknown")
+            health = s.get("health", {}).get("status", "Unknown")
+            if sync in ("Unknown", "OutOfSync") and health != "Missing":
+                log("WARN", f"Force-syncing stuck app: {name} ({sync}/{health})")
+                subprocess.run(
+                    f"kubectl annotate application {name} -n argocd "
+                    f"argocd.argoproj.io/refresh=normal --overwrite",
+                    shell=True, capture_output=True,
+                )
+                subprocess.run(
+                    f"argocd app sync {name} --force --async",
+                    shell=True, capture_output=True,
+                )
+
+    def all_healthy():
+        status = _argocd_app_status()
+        if not status:
             return False
-        apps   = json.loads(r.stdout).get("items", [])
-        status = {a["metadata"]["name"]: a.get("status", {}) for a in apps}
 
         total  = len(expected)
         done   = 0
@@ -1550,21 +1576,60 @@ def phase8_wait_argocd(state: dict):
             ok     = sync == "Synced" and health in ("Healthy", "Progressing")
             if ok:
                 done += 1
+            # Grab first ComparisonError / degraded message for display
+            msg = ""
+            for cond in s.get("conditions", []):
+                if cond.get("type") in ("ComparisonError", "SyncError"):
+                    msg = cond.get("message", "")[:80]
+                    break
+            if not msg and health == "Degraded":
+                msg = s.get("health", {}).get("message", "")[:80]
             icon = green("✓") if ok else yellow("…")
-            rows.append((icon, name, sync, health, ok))
+            rows.append((icon, name, sync, health, ok, msg))
 
         ts = datetime.now().strftime("%H:%M:%S")
-        not_ready = [name for (_, name, _, _, ok) in rows if not ok]
+        not_ready = [name for (_, name, _, _, ok, _) in rows if not ok]
         summary   = f"{done}/{total} healthy"
         if not_ready:
             summary += f"  —  waiting: {', '.join(not_ready)}"
         print(f"\n{dim(ts)}  {'·'}  {bold(summary)}")
-        for (icon, name, sync, health, _) in rows:
-            print(f"    {icon}  {name:40}  {dim(sync + '/' + health)}")
+        for (icon, name, sync, health, _, msg) in rows:
+            line = f"    {icon}  {name:40}  {dim(sync + '/' + health)}"
+            if msg:
+                line += f"  {yellow(msg)}"
+            print(line)
 
         return done == total
 
-    wait_for(all_healthy, "All ArgoCD apps Synced/Healthy", timeout=600, interval=20)
+    # First pass: wait up to 10 min
+    deadline = time.time() + 600
+    interval = 20
+    while time.time() < deadline:
+        if all_healthy():
+            log("OK", "All ArgoCD apps Synced/Healthy")
+            break
+        remaining = int(deadline - time.time())
+        print(f"  {dim(f'  … {remaining}s left')}", end="\r", flush=True)
+        time.sleep(interval)
+    else:
+        # Timeout — force-sync stuck apps and wait a final 5 min
+        print()
+        log("WARN", "Timeout — force-syncing stuck apps and retrying for 5 more minutes …")
+        status = _argocd_app_status()
+        _force_sync_stuck(status)
+        time.sleep(10)
+        deadline2 = time.time() + 300
+        while time.time() < deadline2:
+            if all_healthy():
+                log("OK", "All ArgoCD apps Synced/Healthy (after force-sync)")
+                break
+            remaining = int(deadline2 - time.time())
+            print(f"  {dim(f'  … {remaining}s left')}", end="\r", flush=True)
+            time.sleep(interval)
+        else:
+            print()
+            log("WARN", "Some apps still not healthy — continuing to access summary anyway")
+            all_healthy()  # print final state
 
     # ── Print access summary ─────────────────────────────────────────────────
     nginx_ip = capture(

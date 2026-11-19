@@ -306,7 +306,7 @@ loki.source.kubernetes "pods" {
 // Level label: read from JSON (structured) or guessed from plain text
 loki.process "pods" {
   stage.match {
-    selector = "{namespace=~\".+\"} |~ \"^\\s*\\{\""
+    selector = "{namespace=~\".+\"} |~ \"^\\s*[{]\""
     stage.json {
       expressions = {level = "level", trace_id = "traceId"}
     }
@@ -315,7 +315,7 @@ loki.process "pods" {
     }
   }
   stage.match {
-    selector = "{namespace=~\".+\"} !~ \"^\\s*\\{\""
+    selector = "{namespace=~\".+\"} !~ \"^\\s*[{]\""
     stage.regex {
       expression = "(?i)\\b(?P<level>fatal|panic|critical|error|warn(?:ing)?|info|debug)\\b"
     }
