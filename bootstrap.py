@@ -2756,18 +2756,54 @@ def phase10_rollouts(state: dict):
         shell=True, capture_output=True, text=True,
     )
     if ns_check.returncode != 0:
-        log("WARN", "namespace 'peerisland' not found — triggering ArgoCD sync for peerisland app …")
+        log("WARN", "namespace 'peerisland' not found — checking ArgoCD app status …")
+
+        def _peerisland_app_status():
+            r = subprocess.run(
+                "kubectl get application peerisland -n argocd -o json",
+                shell=True, capture_output=True, text=True,
+            )
+            if r.returncode != 0:
+                return {}
+            try:
+                return json.loads(r.stdout).get("status", {})
+            except Exception:
+                return {}
+
+        def _fix_peerisland_rpc():
+            st = _peerisland_app_status()
+            conds = st.get("conditions", [])
+            msgs = " ".join(c.get("message", "") for c in conds).lower()
+            if "rpc" in msgs or "failed to generate manifest" in msgs:
+                log("WARN", "  peerisland app has rpc error — restarting app-controller and hard-refreshing …")
+                subprocess.run(
+                    "kubectl rollout restart statefulset argocd-application-controller -n argocd",
+                    shell=True, capture_output=True,
+                )
+                subprocess.run(
+                    "kubectl rollout status statefulset argocd-application-controller -n argocd --timeout=120s",
+                    shell=True,
+                )
+                subprocess.run(
+                    "kubectl annotate application peerisland -n argocd "
+                    "argocd.argoproj.io/refresh=hard --overwrite",
+                    shell=True, capture_output=True,
+                )
+                time.sleep(10)
+                return True
+            return False
+
+        _fix_peerisland_rpc()
+
+        log("INFO", "Triggering ArgoCD sync for peerisland app …")
         subprocess.run(
-            "kubectl annotate application peerisland -n argocd "
-            "argocd.argoproj.io/refresh=hard --overwrite",
+            "argocd app sync peerisland --force --async",
             shell=True, capture_output=True,
         )
-        subprocess.run(
-            "argocd app sync peerisland --force --async --timeout 60",
-            shell=True, capture_output=True,
-        )
+
         log("INFO", "Waiting for 'peerisland' namespace to appear (up to 5 min) …")
         deadline_ns = time.time() + 300
+        last_fix_t = time.time()
         while time.time() < deadline_ns:
             r = subprocess.run(
                 "kubectl get namespace peerisland",
@@ -2776,6 +2812,12 @@ def phase10_rollouts(state: dict):
             if r.returncode == 0:
                 log("OK", "namespace 'peerisland' exists — continuing")
                 break
+            # Re-check for rpc error every 60s and fix if needed
+            if time.time() - last_fix_t >= 60:
+                if _fix_peerisland_rpc():
+                    subprocess.run("argocd app sync peerisland --force --async",
+                                   shell=True, capture_output=True)
+                last_fix_t = time.time()
             log("INFO", f"  namespace not yet present — waiting … ({int(deadline_ns - time.time())}s left)")
             time.sleep(15)
         else:
