@@ -1429,6 +1429,44 @@ def phase8_wait_argocd(state: dict):
         return all_ok
 
     wait_for(all_healthy, "All ArgoCD apps Synced/Healthy", timeout=600, interval=20)
+
+    # ── Print access summary ─────────────────────────────────────────────────
+    nginx_ip = capture(
+        "kubectl get svc ingress-nginx-controller -n ingress-nginx "
+        "-o jsonpath='{.status.loadBalancer.ingress[0].ip}'",
+        check=False,
+    ).strip().strip("'")
+    argocd_pass_b64 = capture(
+        "kubectl -n argocd get secret argocd-initial-admin-secret "
+        "-o jsonpath='{.data.password}'",
+        check=False,
+    ).strip().strip("'")
+    if argocd_pass_b64:
+        import base64 as _b64
+        try:
+            argocd_pass = _b64.b64decode(argocd_pass_b64).decode()
+        except Exception:
+            argocd_pass = argocd_pass_b64
+    else:
+        argocd_pass = state["data"].get("argocd_password", "<check argocd-initial-admin-secret>")
+
+    grafana_pass = state["data"].get("grafana_admin_password", "<check grafana-admin-secret in monitoring ns>")
+    argocd_url   = f"https://{nginx_ip}" if nginx_ip else "<nginx LB IP not yet assigned>"
+    grafana_url  = f"http://{nginx_ip}/grafana" if nginx_ip else "<nginx LB IP not yet assigned>"
+
+    state["data"]["argocd_url"]      = argocd_url
+    state["data"]["argocd_password"] = argocd_pass
+
+    sep = "─" * 60
+    print(f"\n  {green('ACCESS SUMMARY')}")
+    print(f"  {sep}")
+    print(f"  ArgoCD   {argocd_url}")
+    print(f"           username: admin   password: {argocd_pass}")
+    print(f"  {sep}")
+    print(f"  Grafana  {grafana_url}")
+    print(f"           username: admin   password: {grafana_pass}")
+    print(f"  {sep}\n")
+
     mark_done(state, 8)
 
 
