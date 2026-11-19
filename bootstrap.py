@@ -28,6 +28,8 @@ Requirements: Python 3.9+ stdlib only. Tools: terraform az kubectl argocd gh git
 import argparse
 import base64
 import getpass
+import shutil
+import threading
 import json
 import os
 import platform
@@ -2158,6 +2160,150 @@ def _refresh_github_secrets(state: dict, org: str, repo_name: str):
         log("WARN", f"OIDC subject check failed: {exc}")
 
 
+# ═════════════════════════════════════════════════════════════════════════════
+#  ArgoCD Live Status Widget  (Phase 9 → 11)
+# ═════════════════════════════════════════════════════════════════════════════
+
+class _ArgoStatusWidget:
+    """
+    Sticky top widget showing live ArgoCD app health/sync.
+
+    Uses ANSI scroll-region to pin HEIGHT rows at the top of the terminal
+    while bootstrap output scrolls below.  Refreshes every 12 s in a
+    background daemon thread.  Safe to call start() / stop() from any phase.
+    Does nothing when stdout is not a tty (CI, piped output).
+    """
+
+    HEIGHT = 7  # rows the widget occupies (title + sep + 4 app rows + sep)
+
+    def __init__(self):
+        self._stop   = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._lock   = threading.Lock()
+        sz = shutil.get_terminal_size((80, 24))
+        self._cols = sz.columns
+        self._rows = sz.lines
+
+    # ── public ────────────────────────────────────────────────────────────────
+
+    def start(self):
+        if not sys.stdout.isatty():
+            return
+        H, rows = self.HEIGHT, self._rows
+        with self._lock:
+            # Pin rows 1..H; let rows H+1..rows scroll normally
+            sys.stdout.write(
+                f"\033[{H + 1};{rows}r"  # scroll region
+                f"\033[{H + 1};1H"       # cursor → start of scroll area
+            )
+            sys.stdout.flush()
+        self._refresh()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        if not sys.stdout.isatty():
+            return
+        self._stop.set()
+        if self._thread:
+            self._thread.join(timeout=3)
+        with self._lock:
+            sys.stdout.write(
+                "\033[r"                          # reset scroll region
+                "\033[1;1H"                       # top of screen
+                + ("\033[2K\n" * self.HEIGHT)     # erase widget rows
+                + "\033[1;1H"                     # cursor back to top
+            )
+            sys.stdout.flush()
+
+    # ── internals ─────────────────────────────────────────────────────────────
+
+    def _run(self):
+        while not self._stop.wait(12):
+            self._refresh()
+
+    def _refresh(self):
+        try:
+            r = subprocess.run(
+                "kubectl get applications -n argocd "
+                "-o jsonpath='"
+                "{range .items[*]}"
+                "{.metadata.name},{.status.health.status},{.status.sync.status}\\n"
+                "{end}'",
+                shell=True, capture_output=True, text=True, timeout=8,
+            )
+            apps = []
+            for ln in r.stdout.strip().splitlines():
+                p = ln.split(",")
+                if len(p) >= 3:
+                    apps.append({"name": p[0], "health": p[1] or "Unknown",
+                                 "sync": p[2] or "Unknown"})
+
+            total   = len(apps)
+            healthy = sum(1 for a in apps if a["health"] == "Healthy")
+            synced  = sum(1 for a in apps if a["sync"]   == "Synced")
+            ts      = datetime.now().strftime("%H:%M:%S")
+
+            if total == 0:
+                overall = dim("(no apps yet)")
+            elif healthy == total:
+                overall = f"{GREEN}{BOLD}✓ All {total} Healthy & Synced{RESET}"
+            else:
+                h = GREEN if healthy == total else YELLOW
+                s = GREEN if synced  == total else YELLOW
+                overall = f"{h}{healthy}/{total} Healthy{RESET}  {s}{synced}/{total} Synced{RESET}"
+
+            # Unhealthy/unsynced first, then fill with healthy — show max 4
+            bad  = [a for a in apps if a["health"] != "Healthy" or a["sync"] != "Synced"]
+            good = [a for a in apps if a not in bad]
+            shown = (bad + good)[:4]
+
+            def _row(a: dict) -> str:
+                ok     = a["health"] == "Healthy" and a["sync"] == "Synced"
+                icon   = f"{GREEN}✓{RESET}" if ok else f"{RED}✗{RESET}"
+                hc     = GREEN if a["health"] == "Healthy" else YELLOW
+                sc     = GREEN if a["sync"]   == "Synced"  else YELLOW
+                return (f"  {icon} {a['name']:<42} "
+                        f"{hc}{a['health']:<12}{RESET}  {sc}{a['sync']}{RESET}")
+
+            sep = dim("─" * min(self._cols - 4, 72))
+            widget_rows = [
+                f"  {BOLD}ArgoCD{RESET}  {overall}  {dim(ts)}",
+                f"  {sep}",
+            ]
+            for a in shown:
+                widget_rows.append(_row(a))
+            while len(widget_rows) < self.HEIGHT - 1:
+                widget_rows.append("")
+            widget_rows.append(f"  {sep}")
+
+            # Atomically overwrite the pinned widget area
+            with self._lock:
+                out = "\033[s\033[1;1H"
+                for ln in widget_rows:
+                    out += f"\033[2K{ln}\r\n"
+                out += "\033[u"
+                sys.stdout.write(out)
+                sys.stdout.flush()
+        except Exception:
+            pass
+
+
+# Singleton — started once at Phase 9, lives until bootstrap exits
+_argocd_widget: "_ArgoStatusWidget | None" = None
+
+
+def _start_argocd_widget():
+    """Start the live ArgoCD widget — idempotent."""
+    global _argocd_widget
+    if _argocd_widget is None and sys.stdout.isatty():
+        _argocd_widget = _ArgoStatusWidget()
+        _argocd_widget.stop_fn = _argocd_widget.stop   # expose for atexit
+        import atexit
+        atexit.register(_argocd_widget.stop)
+        _argocd_widget.start()
+
+
 def _print_access_summary(state: dict):
     """Print ArgoCD, Grafana, and infra URLs with credentials. Called at Phase 9 end and Phase 11."""
     # Resolve nginx LB IP — may have been stored under different keys across phases
@@ -2226,6 +2372,7 @@ def _print_access_summary(state: dict):
 
 def phase9_first_build(state: dict):
     phase_header(9, "Trigger first build via GitHub Actions")
+    _start_argocd_widget()
     org       = state["data"].get("github_org",  "")
     repo_name = state["data"].get("github_repo", "")
     slug      = f"{org}/{repo_name}"
@@ -2281,6 +2428,7 @@ def phase9_first_build(state: dict):
 
 def phase10_rollouts(state: dict):
     phase_header(10, "Watch & promote Rollouts (first deploy)")
+    _start_argocd_widget()  # idempotent — already running from phase 9
 
     for svc in ("backend", "frontend"):
         def paused(s=svc):
@@ -2326,6 +2474,7 @@ def phase10_rollouts(state: dict):
 
 def phase11_summary(state: dict):
     phase_header(11, "Bootstrap complete")
+    _start_argocd_widget()
 
     ip          = state["data"].get("appgw_ip", "<appgw-public-ip>")
     base        = f"https://{ip}"

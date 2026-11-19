@@ -6,8 +6,10 @@ RUN npm ci --only=production
 FROM node:20-alpine AS runtime
 WORKDIR /app
 
-# Non-root user
-RUN addgroup -g 1001 -S nodejs && adduser -S nodejs -u 1001
+# Non-root user; strip npm (not needed at runtime — removes bundled tar CVE)
+RUN addgroup -g 1001 -S nodejs && adduser -S nodejs -u 1001 \
+ && rm -rf /usr/local/lib/node_modules/npm \
+           /usr/local/bin/npm /usr/local/bin/npx
 
 COPY --from=deps /app/node_modules ./node_modules
 COPY src/ ./src/
