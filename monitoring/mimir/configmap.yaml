@@ -35,6 +35,14 @@ data:
         dir: /data/blocks
       tsdb:
         dir: /data/tsdb
+      bucket_store:
+        sync_dir: /data/tsdb-sync
+
+    compactor:
+      data_dir: /data/data-compactor
+
+    ruler:
+      rule_path: /data/data-ruler
 
     activity_tracker:
       filepath: /data/metrics-activity.log
