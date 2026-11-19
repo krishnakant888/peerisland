@@ -881,8 +881,9 @@ def _terraform_drift_apply(state: dict):
     if not (tf_dir / "terraform.tfvars").exists():
         return
     log("INFO", "Checking terraform for infrastructure drift …")
+    # -lock=false is safe for plan (read-only); avoids failing on a stale lock from a prior run
     r = subprocess.run(
-        "terraform plan -detailed-exitcode -out=tfplan",
+        "terraform plan -detailed-exitcode -lock=false -out=tfplan",
         shell=True, cwd=str(tf_dir),
         capture_output=True, text=True, encoding="utf-8", errors="replace",
     )
@@ -890,7 +891,37 @@ def _terraform_drift_apply(state: dict):
         log("OK", "Terraform: no changes — infrastructure up to date")
         return
     if r.returncode == 1:
-        log("WARN", f"Terraform plan failed: {(r.stderr or r.stdout)[:200]}")
+        err = (r.stderr or r.stdout or "")
+        # Try to force-unlock a stale state lock then retry
+        if "state lock" in err.lower() or "already locked" in err.lower():
+            lock_id = ""
+            for line in err.splitlines():
+                if "ID:" in line:
+                    lock_id = line.split("ID:")[-1].strip()
+                    break
+            if lock_id:
+                log("WARN", f"Stale state lock detected (ID: {lock_id}) — force-unlocking …")
+                subprocess.run(f"terraform force-unlock -force {lock_id}",
+                               shell=True, cwd=str(tf_dir), capture_output=True)
+                # Retry plan after unlock
+                r = subprocess.run(
+                    "terraform plan -detailed-exitcode -out=tfplan",
+                    shell=True, cwd=str(tf_dir),
+                    capture_output=True, text=True, encoding="utf-8", errors="replace",
+                )
+                if r.returncode not in (1,):
+                    pass  # fall through to drift check below
+                else:
+                    log("WARN", f"Terraform plan failed after unlock: {(r.stderr or r.stdout)[:200]}")
+                    return
+            else:
+                log("WARN", f"Terraform plan failed: {err[:200]}")
+                return
+        else:
+            log("WARN", f"Terraform plan failed: {err[:200]}")
+            return
+    if r.returncode == 0:
+        log("OK", "Terraform: no changes — infrastructure up to date")
         return
     # exit code 2 = changes pending
     log("WARN", "Terraform drift detected — auto-applying …")
@@ -1415,6 +1446,16 @@ def phase8_wait_argocd(state: dict):
     # Print access credentials so the user can log in while sync is in progress
     argocd_pw    = state["data"].get("argocd_password", "")
     grafana_pw   = state["data"].get("grafana_admin_password", "")
+    if not grafana_pw:
+        kv = state["data"].get("kv_name", "") or state["data"].get("key_vault_name", "")
+        if kv:
+            r = subprocess.run(
+                f"az keyvault secret show --vault-name {kv} --name grafana-admin-password --query value -o tsv",
+                shell=True, capture_output=True, text=True, encoding="utf-8",
+            )
+            if r.returncode == 0:
+                grafana_pw = r.stdout.strip()
+                state["data"]["grafana_admin_password"] = grafana_pw
     nginx_ip     = state["data"].get("appgw_ip", "")
     argocd_url   = f"https://{nginx_ip}" if nginx_ip else "(nginx LB IP pending)"
     grafana_url  = f"http://{nginx_ip}/grafana" if nginx_ip else "(nginx LB IP pending)"
