@@ -20,7 +20,8 @@ resource "azurerm_kubernetes_cluster" "main" {
   }
 
   default_node_pool {
-    name                = "system"
+    name                        = "system"
+    temporary_name_for_rotation = "systmp"
     vm_size             = var.node_pool_vm_size
     auto_scaling_enabled = true
     min_count            = var.node_pool_min_count
