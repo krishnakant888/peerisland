@@ -1779,11 +1779,12 @@ def phase8_wait_argocd(state: dict):
 # ═════════════════════════════════════════════════════════════════════════════
 
 def _refresh_github_secrets(state: dict, org: str, repo_name: str):
-    """Re-push all GitHub Actions secrets from Terraform outputs.
+    """Re-push all GitHub Actions secrets and fix the OIDC federated credential.
 
-    Phase 3 runs before Terraform, so secrets may have been set with empty
-    placeholders.  This is called at the start of Phase 9 to ensure the real
-    values are in place before the first build is triggered.
+    Phase 3 runs before Terraform so secrets may carry empty placeholders.
+    GitHub OIDC tokens include internal numeric IDs in the subject claim
+    (repo:org@userId/repo@repoId:ref:...) which must match the Azure AD
+    federated credential exactly — Terraform sets the plain form, we fix it here.
     """
     tf_dir = REPO_ROOT / "terraform"
     tf_outs_raw = capture("terraform output -json", cwd=tf_dir, check=False)
@@ -1792,19 +1793,20 @@ def _refresh_github_secrets(state: dict, org: str, repo_name: str):
     def tf(key: str) -> str:
         return tf_outs.get(key, {}).get("value", "") or ""
 
-    client_id = tf("cicd_client_id") or capture(
+    client_id  = tf("cicd_client_id") or capture(
         "az ad sp list --display-name peerisland-prod-cicd --query [0].appId -o tsv",
         check=False,
     ).strip()
     tenant_id  = tf("cicd_tenant_id")  or state["data"].get("tenant_id", "")
     sub_id     = tf("cicd_subscription_id") or state["data"].get("subscription_id", "")
-    acr_name   = state["data"].get("acr_name",         "peerislandprodacr")
-    acr_server = state["data"].get("acr_login_server", f"{acr_name}.azurecr.io")
-    aks_name   = state["data"].get("aks_cluster_name", "peerisland-prod-aks")
+    acr_name   = state["data"].get("acr_name",          "peerislandprodacr")
+    acr_server = state["data"].get("acr_login_server",  f"{acr_name}.azurecr.io")
+    aks_name   = state["data"].get("aks_cluster_name",  "peerisland-prod-aks")
     aks_rg     = state["data"].get("aks_resource_group","peerisland-prod-rg")
 
     slug = f"{org}/{repo_name}"
 
+    # ── GitHub Actions secrets ────────────────────────────────────────────────
     def _set(name: str, val: str):
         if not val:
             log("WARN", f"  {name}: empty — skipping")
@@ -1813,8 +1815,8 @@ def _refresh_github_secrets(state: dict, org: str, repo_name: str):
             f'gh secret set {name} --repo {slug} --body "{val}"',
             shell=True, capture_output=True, text=True,
         )
-        status = green("✓") if r.returncode == 0 else yellow("!")
-        log("OK" if r.returncode == 0 else "WARN", f"  {status} {name}")
+        icon = green("✓") if r.returncode == 0 else yellow("!")
+        log("OK" if r.returncode == 0 else "WARN", f"  {icon} {name}")
 
     log("INFO", "Refreshing GitHub Actions secrets from Terraform outputs …")
     for name, val in [
@@ -1831,10 +1833,92 @@ def _refresh_github_secrets(state: dict, org: str, repo_name: str):
     if not client_id:
         log("WARN",
             "AZURE_CLIENT_ID still empty — OIDC login will fail.\n"
-            "  Run: az ad sp list --display-name peerisland-prod-cicd --query [0].appId -o tsv\n"
-            "  Then: gh secret set AZURE_CLIENT_ID --repo {slug} --body <appId>")
-    else:
-        log("OK", f"GitHub Actions secrets up to date  (client_id={client_id[:8]}…)")
+            f"  Run: az ad sp list --display-name peerisland-prod-cicd --query [0].appId -o tsv\n"
+            f"  Then: gh secret set AZURE_CLIENT_ID --repo {slug} --body <appId>")
+        return
+    log("OK", f"GitHub Actions secrets up to date  (client_id={client_id[:8]}…)")
+
+    # ── OIDC federated credential subject fix ────────────────────────────────
+    # GitHub OIDC tokens embed internal numeric IDs:
+    #   repo:ORG@USER_ID/REPO@REPO_ID:ref:refs/heads/BRANCH
+    # The Azure federated credential subject must match exactly.
+    # Terraform sets the plain form; we detect and correct it here.
+    log("INFO", "Verifying Azure AD OIDC federated credential subject …")
+    try:
+        user_id_r = subprocess.run(
+            f"gh api users/{org} --jq .id",
+            shell=True, capture_output=True, text=True,
+        )
+        repo_id_r = subprocess.run(
+            f"gh api repos/{org}/{repo_name} --jq .id",
+            shell=True, capture_output=True, text=True,
+        )
+        user_id = user_id_r.stdout.strip()
+        repo_id = repo_id_r.stdout.strip()
+        if not user_id or not repo_id:
+            log("WARN", "Could not fetch GitHub user/repo IDs — skipping OIDC subject fix")
+            return
+
+        correct_subject = (
+            f"repo:{org}@{user_id}/{repo_name}@{repo_id}:ref:refs/heads/main"
+        )
+
+        # Get the Azure AD app object ID
+        app_obj_id = capture(
+            "az ad app list --display-name peerisland-prod-cicd --query [0].id -o tsv",
+            check=False,
+        ).strip()
+        if not app_obj_id:
+            log("WARN", "Could not find peerisland-prod-cicd app — skipping OIDC fix")
+            return
+
+        # List existing federated credentials
+        creds_raw = capture(
+            f"az ad app federated-credential list --id {app_obj_id} -o json",
+            check=False,
+        )
+        creds = json.loads(creds_raw) if creds_raw.strip().startswith("[") else []
+
+        # Find the main-branch credential and check its subject
+        main_cred = next(
+            (c for c in creds if "main" in c.get("name", "").lower()
+             or "main" in c.get("subject", "").lower()),
+            creds[0] if creds else None,
+        )
+        if not main_cred:
+            log("WARN", "No federated credential found — Terraform may not have applied yet")
+            return
+
+        current_subject = main_cred.get("subject", "")
+        cred_id = main_cred["id"]
+
+        if current_subject == correct_subject:
+            log("OK", f"OIDC subject already correct: {correct_subject[:60]}")
+            return
+
+        log("WARN",
+            f"OIDC subject mismatch:\n"
+            f"    have: {current_subject}\n"
+            f"    need: {correct_subject}\n"
+            f"  Updating …")
+
+        import tempfile as _tmp
+        with _tmp.NamedTemporaryFile(mode="w", suffix=".json",
+                                     delete=False, encoding="utf-8") as f:
+            json.dump({"subject": correct_subject}, f)
+            tmp_path = f.name
+        r = subprocess.run(
+            f'az ad app federated-credential update --id {app_obj_id} '
+            f'--federated-credential-id {cred_id} --parameters "@{tmp_path}"',
+            shell=True, capture_output=True, text=True,
+        )
+        Path(tmp_path).unlink(missing_ok=True)
+        if r.returncode == 0:
+            log("OK", f"OIDC federated credential updated → {correct_subject[:60]}")
+        else:
+            log("WARN", f"OIDC credential update failed: {(r.stderr or r.stdout)[:120]}")
+    except Exception as exc:
+        log("WARN", f"OIDC subject check skipped: {exc}")
 
 
 def phase9_first_build(state: dict):
