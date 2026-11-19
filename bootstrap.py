@@ -1540,18 +1540,29 @@ def phase8_wait_argocd(state: dict):
         apps   = json.loads(r.stdout).get("items", [])
         status = {a["metadata"]["name"]: a.get("status", {}) for a in apps}
 
-        all_ok = True
-        print()  # newline before the status table
+        total  = len(expected)
+        done   = 0
+        rows   = []
         for name in expected:
             s      = status.get(name, {})
             sync   = s.get("sync",   {}).get("status", "Unknown")
             health = s.get("health", {}).get("status", "Unknown")
             ok     = sync == "Synced" and health in ("Healthy", "Progressing")
-            icon   = green("✓") if ok else yellow("…")
+            if ok:
+                done += 1
+            icon = green("✓") if ok else yellow("…")
+            rows.append((icon, name, sync, health, ok))
+
+        ts = datetime.now().strftime("%H:%M:%S")
+        not_ready = [name for (_, name, _, _, ok) in rows if not ok]
+        summary   = f"{done}/{total} healthy"
+        if not_ready:
+            summary += f"  —  waiting: {', '.join(not_ready)}"
+        print(f"\n{dim(ts)}  {'·'}  {bold(summary)}")
+        for (icon, name, sync, health, _) in rows:
             print(f"    {icon}  {name:40}  {dim(sync + '/' + health)}")
-            if not ok:
-                all_ok = False
-        return all_ok
+
+        return done == total
 
     wait_for(all_healthy, "All ArgoCD apps Synced/Healthy", timeout=600, interval=20)
 
