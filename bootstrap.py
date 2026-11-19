@@ -1974,6 +1974,7 @@ def phase8_wait_argocd(state: dict):
 
     _kustomize_fix_done        = [False]  # mutable flags visible to nested functions
     _cainjector_ignore_patched = [False]
+    _progressing_since: dict   = {}       # app → first-seen-Progressing timestamp
 
     def _diagnose_and_fix_unhealthy(status: dict):
         """
@@ -2150,6 +2151,60 @@ def phase8_wait_argocd(state: dict):
                         if pod_line.strip():
                             log("INFO", f"    pod: {pod_line.strip()[:100]}")
 
+            # ── Fix 7: Synced/Progressing stuck > 5 min — restart pods ───
+            # ArgoCD treats Progressing as OK, but a Deployment that never
+            # becomes Ready usually has a stuck pod (Pending, CrashLoop, or
+            # readiness probe failing). After 5 minutes we delete the pods to
+            # trigger a fresh rollout — Kubernetes re-creates them immediately.
+            if sync == "Synced" and health == "Progressing":
+                now = time.time()
+                first = _progressing_since.setdefault(name, now)
+                stuck_mins = (now - first) / 60
+                if stuck_mins >= 5:
+                    app_ns_map = {
+                        "monitoring-prometheus-adapter": "monitoring",
+                        "monitoring-grafana":            "monitoring",
+                        "monitoring-loki":               "monitoring",
+                        "monitoring-tempo":              "monitoring",
+                        "monitoring-alloy":              "monitoring",
+                        "ingress-nginx":                 "ingress-nginx",
+                        "argo-rollouts":                 "argo-rollouts",
+                        "peerisland-app":                "peerisland",
+                    }
+                    ns = app_ns_map.get(name, "")
+                    label_map = {
+                        "monitoring-prometheus-adapter": "app.kubernetes.io/name=prometheus-adapter",
+                        "monitoring-grafana":            "app.kubernetes.io/name=grafana",
+                        "monitoring-loki":               "app.kubernetes.io/name=loki",
+                        "monitoring-tempo":              "app.kubernetes.io/name=tempo",
+                        "monitoring-alloy":              "app.kubernetes.io/name=alloy",
+                        "ingress-nginx":                 "app.kubernetes.io/name=ingress-nginx",
+                        "argo-rollouts":                 "app.kubernetes.io/name=argo-rollouts",
+                    }
+                    label_sel = label_map.get(name, "")
+                    if ns and label_sel:
+                        # Log pod state before deleting
+                        pods_r = subprocess.run(
+                            f"kubectl get pods -n {ns} -l {label_sel} --no-headers "
+                            f"-o custom-columns=NAME:.metadata.name,STATUS:.status.phase,"
+                            f"READY:.status.containerStatuses[0].ready,"
+                            f"REASON:.status.containerStatuses[0].state.waiting.reason",
+                            shell=True, capture_output=True, text=True,
+                        )
+                        for line in (pods_r.stdout or "").strip().splitlines()[:5]:
+                            if line.strip():
+                                log("INFO", f"    pod state: {line.strip()[:100]}")
+                        log("WARN",
+                            f"  {name}: Synced/Progressing for >{stuck_mins:.0f} min "
+                            f"— deleting stuck pods to trigger fresh rollout …")
+                        subprocess.run(
+                            f"kubectl delete pods -n {ns} -l {label_sel} --grace-period=10",
+                            shell=True, capture_output=True,
+                        )
+                        _progressing_since.pop(name, None)  # reset timer after restart
+            elif health != "Progressing":
+                _progressing_since.pop(name, None)  # reset if no longer Progressing
+
     def _force_sync_stuck(status: dict):
         """Force-refresh and sync apps that are Unknown or OutOfSync."""
         _diagnose_and_fix_unhealthy(status)
@@ -2166,7 +2221,13 @@ def phase8_wait_argocd(state: dict):
             s      = status.get(name, {})
             sync   = s.get("sync",   {}).get("status", "Unknown")
             health = s.get("health", {}).get("status", "Unknown")
-            ok     = sync == "Synced" and health in ("Healthy", "Progressing")
+            # Progressing is OK for the first 5 min — after that it's considered
+            # stuck and Fix 7 in _diagnose_and_fix_unhealthy will restart pods.
+            progressing_too_long = (
+                health == "Progressing"
+                and (time.time() - _progressing_since.get(name, time.time())) >= 300
+            )
+            ok     = sync == "Synced" and health in ("Healthy", "Progressing") and not progressing_too_long
             if ok:
                 done += 1
             # Grab first ComparisonError / degraded message for display
