@@ -28,7 +28,6 @@ const httpRequestDuration = new client.Histogram({
   labelNames: ['method', 'route', 'status_code'],
   buckets: [0.05, 0.1, 0.3, 0.5, 1, 2, 5],
   registers: [register],
-  enableExemplars: true,
 });
 
 app.use(cors());
