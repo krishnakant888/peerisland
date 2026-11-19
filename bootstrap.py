@@ -2237,6 +2237,8 @@ def phase8_wait_argocd(state: dict):
         nginx_ip = lb_r.stdout.strip().strip("'")
         if nginx_ip:
             log("OK", f"Ingress LB IP: {nginx_ip}")
+            state["data"]["appgw_ip"] = nginx_ip
+            save_state(state)
             break
         remaining = int(lb_deadline - time.time())
         print(f"  {dim(f'  LB pending … {remaining}s left')}", end="\r", flush=True)
@@ -3445,11 +3447,60 @@ def phase10_rollouts(state: dict):
 def phase11_summary(state: dict):
     phase_header(11, "Bootstrap complete")
 
-    ip          = state["data"].get("appgw_ip", "<appgw-public-ip>")
-    base        = f"https://{ip}"
-    argocd_pw   = state["data"].get("argocd_password", "(check secret: argocd-initial-admin-secret)")
-    grafana_user= state["data"].get("grafana_user",    "admin")
-    grafana_pw  = state["data"].get("grafana_password", "(check Key Vault: grafana-admin-password)")
+    # ── Resolve nginx LB IP — state first, then live kubectl ──────────────────
+    ip = state["data"].get("appgw_ip") or state["data"].get("nginx_ip", "")
+    if not ip:
+        lb_r = subprocess.run(
+            "kubectl get svc ingress-nginx-controller -n ingress-nginx "
+            "-o jsonpath='{.status.loadBalancer.ingress[0].ip}'",
+            shell=True, capture_output=True, text=True,
+        )
+        ip = lb_r.stdout.strip().strip("'")
+        if ip:
+            state["data"]["appgw_ip"] = ip
+            save_state(state)
+            log("OK", f"Ingress LB IP (live): {ip}")
+        else:
+            ip = "<appgw-public-ip>"
+            log("WARN", "nginx LB IP not yet assigned — run 'python bootstrap.py --from 8' after AKS provisions it")
+
+    base = f"https://{ip}"
+
+    # ── ArgoCD password ───────────────────────────────────────────────────────
+    argocd_pw = state["data"].get("argocd_password", "")
+    if not argocd_pw:
+        pw_b64 = subprocess.run(
+            "kubectl -n argocd get secret argocd-initial-admin-secret "
+            "-o jsonpath='{.data.password}'",
+            shell=True, capture_output=True, text=True,
+        ).stdout.strip().strip("'")
+        if pw_b64:
+            try:
+                argocd_pw = base64.b64decode(pw_b64 + "==").decode().strip()
+                state["data"]["argocd_password"] = argocd_pw
+                save_state(state)
+            except Exception:
+                argocd_pw = pw_b64
+    argocd_pw = argocd_pw or "(check secret: argocd-initial-admin-secret)"
+
+    # ── Grafana credentials — state (either key), then Key Vault ─────────────
+    grafana_user = state["data"].get("grafana_user", "admin")
+    grafana_pw   = (state["data"].get("grafana_admin_password")
+                    or state["data"].get("grafana_password", ""))
+    if not grafana_pw:
+        kv = state["data"].get("kv_name") or state["data"].get("key_vault_name", "")
+        if kv:
+            kv_r = subprocess.run(
+                f"az keyvault secret show --vault-name {kv} "
+                f"--name grafana-admin-password --query value -o tsv",
+                shell=True, capture_output=True, text=True, encoding="utf-8",
+            )
+            if kv_r.returncode == 0 and kv_r.stdout.strip():
+                grafana_pw = kv_r.stdout.strip()
+                state["data"]["grafana_admin_password"] = grafana_pw
+                save_state(state)
+                log("OK", "Grafana password fetched from Key Vault")
+    grafana_pw = grafana_pw or "(check Key Vault: grafana-admin-password)"
 
     W = 60  # box inner width
 
