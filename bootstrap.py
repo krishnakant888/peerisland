@@ -2078,6 +2078,23 @@ def phase8_wait_argocd(state: dict):
                         shell=True, capture_output=True,
                     )
 
+            # ── Fix 4c: ingress-nginx LB stuck Progressing ───────────────
+            # When AKS can't provision a LoadBalancer the service stays in
+            # Pending indefinitely, leaving ingress-nginx Synced/Progressing.
+            # Root cause: AKS system-assigned MI is missing Network Contributor
+            # on the VNet. We check and apply the role directly via az CLI
+            # (faster than waiting for terraform apply).
+            elif (name == "ingress-nginx" and health == "Progressing"):
+                lb_r = subprocess.run(
+                    "kubectl get svc ingress-nginx-controller -n ingress-nginx "
+                    "-o jsonpath='{.status.loadBalancer.ingress[0].ip}'",
+                    shell=True, capture_output=True, text=True,
+                )
+                lb_ip = lb_r.stdout.strip().strip("'")
+                if not lb_ip:
+                    log("WARN", "  ingress-nginx: LB IP not yet assigned — checking Network Contributor role …")
+                    _ensure_aks_network_contributor(state)
+
             # ── Fix 4: OutOfSync — trigger a sync ─────────────────────────
             elif sync == "OutOfSync":
                 log("WARN", f"  {name}: OutOfSync — triggering sync …")
@@ -2207,12 +2224,31 @@ def phase8_wait_argocd(state: dict):
             log("WARN", "Some apps still not healthy — continuing to access summary anyway")
             all_healthy()  # print final state
 
+    # ── Wait for nginx LB IP — AKS may need a minute after Network Contributor ─
+    log("INFO", "Waiting for ingress-nginx LoadBalancer IP (up to 5 min) …")
+    nginx_ip = ""
+    lb_deadline = time.time() + 300
+    while time.time() < lb_deadline:
+        lb_r = subprocess.run(
+            "kubectl get svc ingress-nginx-controller -n ingress-nginx "
+            "-o jsonpath='{.status.loadBalancer.ingress[0].ip}'",
+            shell=True, capture_output=True, text=True,
+        )
+        nginx_ip = lb_r.stdout.strip().strip("'")
+        if nginx_ip:
+            log("OK", f"Ingress LB IP: {nginx_ip}")
+            break
+        remaining = int(lb_deadline - time.time())
+        print(f"  {dim(f'  LB pending … {remaining}s left')}", end="\r", flush=True)
+        time.sleep(10)
+    else:
+        print()
+        log("WARN",
+            "LoadBalancer IP not assigned within 5 min. "
+            "Check: az role assignment list --assignee <AKS-MI> --role 'Network Contributor'  "
+            "and ensure terraform apply has run. Continuing with empty IP.")
+
     # ── Print access summary ─────────────────────────────────────────────────
-    nginx_ip = capture(
-        "kubectl get svc ingress-nginx-controller -n ingress-nginx "
-        "-o jsonpath='{.status.loadBalancer.ingress[0].ip}'",
-        check=False,
-    ).strip().strip("'")
     argocd_pass_b64 = capture(
         "kubectl -n argocd get secret argocd-initial-admin-secret "
         "-o jsonpath='{.data.password}'",
@@ -2757,6 +2793,71 @@ def _start_argocd_widget():
         signal.signal(signal.SIGINT, _sigint_handler)
 
         _argocd_widget.start()
+
+
+def _ensure_aks_network_contributor(state: dict):
+    """Ensure AKS system-assigned MI has Network Contributor on the cluster VNet.
+
+    AKS needs this role to provision Azure LoadBalancer services. Terraform
+    manages it via azurerm_role_assignment.aks_vnet_network_contributor, but
+    if that apply hasn't run yet (or the role was deleted), we apply it directly
+    so the LB can be provisioned without waiting for terraform.
+    """
+    rg      = state["data"].get("aks_resource_group", "peerisland-prod-rg")
+    cluster = state["data"].get("aks_cluster_name",   "peerisland-prod-aks")
+
+    # Get the AKS system-assigned MI principal ID
+    mi_r = subprocess.run(
+        f"az aks show -g {rg} -n {cluster} "
+        f"--query identity.principalId -o tsv",
+        shell=True, capture_output=True, text=True, encoding="utf-8",
+    )
+    principal_id = mi_r.stdout.strip()
+    if not principal_id:
+        log("WARN", "  _ensure_aks_network_contributor: cannot get AKS principal ID")
+        return
+
+    # Get the VNet resource ID
+    vnet_r = subprocess.run(
+        f"az network vnet list -g {rg} --query \"[0].id\" -o tsv",
+        shell=True, capture_output=True, text=True, encoding="utf-8",
+    )
+    vnet_id = vnet_r.stdout.strip()
+    if not vnet_id:
+        log("WARN", "  _ensure_aks_network_contributor: cannot find VNet in resource group")
+        return
+
+    # Check if the role is already assigned
+    check_r = subprocess.run(
+        f"az role assignment list --assignee {principal_id} "
+        f"--scope \"{vnet_id}\" --role \"Network Contributor\" "
+        f"--query \"[].id\" -o tsv",
+        shell=True, capture_output=True, text=True, encoding="utf-8",
+    )
+    if check_r.stdout.strip():
+        log("OK", "  AKS Network Contributor on VNet already assigned")
+        return
+
+    log("WARN",
+        f"  AKS MI ({principal_id[:12]}…) missing Network Contributor on VNet — assigning …")
+    assign_r = subprocess.run(
+        f"az role assignment create "
+        f"--assignee-object-id {principal_id} "
+        f"--assignee-principal-type ServicePrincipal "
+        f"--role \"Network Contributor\" "
+        f"--scope \"{vnet_id}\"",
+        shell=True, capture_output=True, text=True, encoding="utf-8",
+    )
+    if assign_r.returncode == 0:
+        log("OK",
+            "  Network Contributor assigned — AKS will provision the LoadBalancer "
+            "(may take 1-2 min for Azure to propagate)")
+    elif "already exists" in (assign_r.stderr or assign_r.stdout).lower():
+        log("OK", "  Network Contributor already exists (Azure reported duplicate)")
+    else:
+        log("WARN",
+            f"  az role assignment create failed: "
+            f"{(assign_r.stderr or assign_r.stdout)[:200]}")
 
 
 def _argocd_ensure_webhook_ignore_patch() -> bool:
