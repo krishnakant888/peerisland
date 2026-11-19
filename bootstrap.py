@@ -1205,10 +1205,10 @@ def _ensure_vcpu_quota(state: dict, vcpus_needed: int = 8):
     if not m:
         log("WARN", f"Cannot parse VM family from {vm_size} — skipping quota check")
         return
-    series = m.group(1)                   # D
-    suffix = m.group(3).upper()           # s → S
-    ver    = (m.group(4) or "").capitalize()  # v5 → V5
-    family = f"standard{series}{suffix}{ver}Family"  # standardDSV5Family
+    series = m.group(1)          # D
+    suffix = m.group(3).upper()  # s → S
+    ver    = m.group(4) or ""    # v5 (keep lowercase as Azure expects)
+    family = f"standard{series}{suffix}{ver}Family"  # standardDSv5Family
 
     # ── Check current usage via Compute usages API ────────────────────────────
     usage_url = (
