@@ -1199,10 +1199,10 @@ def _ensure_user_nodes(state: dict):
     )
     count = result.stdout.strip()
     if count == "0" or count == "":
-        log("WARN", "User node pool has 0 nodes — scaling to 1 so workload pods can schedule …")
+        log("WARN", "User node pool has 0 nodes — bumping min-count to 1 so autoscaler provisions a node …")
         subprocess.run(
-            f"az aks nodepool scale -g {rg} --cluster-name {cluster} "
-            f"--name user --node-count 1",
+            f"az aks nodepool update -g {rg} --cluster-name {cluster} "
+            f"--name user --min-count 1 --max-count 5",
             shell=True, check=True, encoding="utf-8", errors="replace",
         )
         log("OK", "User node pool scaled to 1 — waiting for node to be Ready …")
