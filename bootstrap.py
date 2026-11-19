@@ -1778,11 +1778,73 @@ def phase8_wait_argocd(state: dict):
 #  PHASE 9 — Trigger first build (GitHub Actions)
 # ═════════════════════════════════════════════════════════════════════════════
 
+def _refresh_github_secrets(state: dict, org: str, repo_name: str):
+    """Re-push all GitHub Actions secrets from Terraform outputs.
+
+    Phase 3 runs before Terraform, so secrets may have been set with empty
+    placeholders.  This is called at the start of Phase 9 to ensure the real
+    values are in place before the first build is triggered.
+    """
+    tf_dir = REPO_ROOT / "terraform"
+    tf_outs_raw = capture("terraform output -json", cwd=tf_dir, check=False)
+    tf_outs = json.loads(tf_outs_raw) if tf_outs_raw.strip().startswith("{") else {}
+
+    def tf(key: str) -> str:
+        return tf_outs.get(key, {}).get("value", "") or ""
+
+    client_id = tf("cicd_client_id") or capture(
+        "az ad sp list --display-name peerisland-prod-cicd --query [0].appId -o tsv",
+        check=False,
+    ).strip()
+    tenant_id  = tf("cicd_tenant_id")  or state["data"].get("tenant_id", "")
+    sub_id     = tf("cicd_subscription_id") or state["data"].get("subscription_id", "")
+    acr_name   = state["data"].get("acr_name",         "peerislandprodacr")
+    acr_server = state["data"].get("acr_login_server", f"{acr_name}.azurecr.io")
+    aks_name   = state["data"].get("aks_cluster_name", "peerisland-prod-aks")
+    aks_rg     = state["data"].get("aks_resource_group","peerisland-prod-rg")
+
+    slug = f"{org}/{repo_name}"
+
+    def _set(name: str, val: str):
+        if not val:
+            log("WARN", f"  {name}: empty — skipping")
+            return
+        r = subprocess.run(
+            f'gh secret set {name} --repo {slug} --body "{val}"',
+            shell=True, capture_output=True, text=True,
+        )
+        status = green("✓") if r.returncode == 0 else yellow("!")
+        log("OK" if r.returncode == 0 else "WARN", f"  {status} {name}")
+
+    log("INFO", "Refreshing GitHub Actions secrets from Terraform outputs …")
+    for name, val in [
+        ("AZURE_CLIENT_ID",       client_id),
+        ("AZURE_TENANT_ID",       tenant_id),
+        ("AZURE_SUBSCRIPTION_ID", sub_id),
+        ("ACR_NAME",              acr_name),
+        ("ACR_LOGIN_SERVER",      acr_server),
+        ("AKS_CLUSTER_NAME",      aks_name),
+        ("AKS_RESOURCE_GROUP",    aks_rg),
+    ]:
+        _set(name, val)
+
+    if not client_id:
+        log("WARN",
+            "AZURE_CLIENT_ID still empty — OIDC login will fail.\n"
+            "  Run: az ad sp list --display-name peerisland-prod-cicd --query [0].appId -o tsv\n"
+            "  Then: gh secret set AZURE_CLIENT_ID --repo {slug} --body <appId>")
+    else:
+        log("OK", f"GitHub Actions secrets up to date  (client_id={client_id[:8]}…)")
+
+
 def phase9_first_build(state: dict):
     phase_header(9, "Trigger first build via GitHub Actions")
     org       = state["data"].get("github_org",  "")
     repo_name = state["data"].get("github_repo", "")
     slug      = f"{org}/{repo_name}"
+
+    # Ensure all secrets carry real post-Terraform values (Phase 3 ran before TF)
+    _refresh_github_secrets(state, org, repo_name)
 
     result = run(
         f"gh workflow run build-push.yml --repo {slug} --ref main",
