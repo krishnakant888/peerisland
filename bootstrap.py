@@ -2689,7 +2689,7 @@ def phase9_first_build(state: dict):
 def _rollout_status_summary(svc: str) -> dict:
     """Return a dict with phase, desired, ready, available, message from the Rollout."""
     r = subprocess.run(
-        f"kubectl argo rollouts get rollout {svc} -n peerisland -o json",
+        f"kubectl get rollout {svc} -n peerisland -o json",
         shell=True, capture_output=True, text=True,
     )
     if r.returncode != 0 or not r.stdout.strip():
@@ -2738,7 +2738,8 @@ def phase10_rollouts(state: dict):
             die(f"{svc} Rollout did not reach Paused within 300s. Last phase={info['phase']} message={info['message']!r}")
 
         log("OK", f"{svc}: promoting (first deploy — no manual traffic gate needed)")
-        run(f"kubectl argo rollouts promote {svc} -n peerisland")
+        run(f"kubectl patch rollout {svc} -n peerisland --type=merge -p '{{\"spec\":{{\"paused\":false}}}}'")
+
 
     # ── Confirm both reach Healthy ────────────────────────────────────────────
     for svc in ("backend", "frontend"):
