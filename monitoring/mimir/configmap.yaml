@@ -19,14 +19,14 @@ data:
         dir: /data/blocks
 
     alertmanager_storage:
-      backend: local
-      local:
-        path: /data/alertmanager
+      backend: filesystem
+      filesystem:
+        dir: /data/alertmanager
 
     ruler_storage:
-      backend: local
-      local:
-        directory: /data/ruler
+      backend: filesystem
+      filesystem:
+        dir: /data/ruler
 
     compactor:
       blocks_retention_period: 720h
