@@ -30,7 +30,7 @@ mimir:
       max_global_series_per_user: 1500000
       max_exemplars_per_series_per_minute: 1000
 
-    # Alertmanager receivers — fill in secrets from Key Vault via SecretProviderClass
+    # Alertmanager — null receiver by default; add Slack/PagerDuty via Key Vault later
     alertmanager:
       external_url: "http://mimir.monitoring.svc.cluster.local:8080/alertmanager"
     alertmanager_config:
@@ -40,17 +40,8 @@ mimir:
         group_interval: 5m
         repeat_interval: 4h
         receiver: "null"
-        routes:
-          - matchers: ["severity=~\"warning|critical\""]
-            receiver: "platform-slack"
       receivers:
         - name: "null"
-        - name: "platform-slack"
-          slack_configs:
-            - api_url: "REPLACE_WITH_SLACK_WEBHOOK"
-              channel: "#platform-alerts"
-              title: "{{ .GroupLabels.alertname }}"
-              text: "{{ range .Alerts }}{{ .Annotations.description }}\n{{ end }}"
 
     # Recording rules (pre-computed at ingest for fast dashboard queries)
     ruler:
