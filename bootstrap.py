@@ -1176,6 +1176,42 @@ def phase7_argocd(state: dict):
         else:
             log("WARN", "argocd-github-token not found in Key Vault — repo may fail to sync")
 
+    # ── Grafana admin secret ─────────────────────────────────────────────────
+    # grafana-values.yaml uses existingSecret: grafana-admin-secret — create it
+    # if missing, pulling from Key Vault or generating a fresh one.
+    kv_name = state["data"].get("key_vault_name", "")
+    grafana_pass = ""
+    if kv_name:
+        kv_r = subprocess.run(
+            f"az keyvault secret show --vault-name {kv_name} "
+            f"--name grafana-admin-password --query value -o tsv",
+            shell=True, capture_output=True, text=True, encoding="utf-8",
+        )
+        if kv_r.returncode == 0:
+            grafana_pass = kv_r.stdout.strip()
+    if not grafana_pass:
+        import secrets as _sec, string as _str
+        grafana_pass = "".join(
+            _sec.choice(_str.ascii_letters + _str.digits + "!@#$%")
+            for _ in range(16)
+        )
+        log("INFO", f"Generated Grafana admin password (admin / {grafana_pass})")
+        if kv_name:
+            subprocess.run(
+                f"az keyvault secret set --vault-name {kv_name} "
+                f"--name grafana-admin-password --value {grafana_pass!r}",
+                shell=True, capture_output=True, encoding="utf-8",
+            )
+
+    run("kubectl create namespace monitoring --dry-run=client -o yaml | kubectl apply -f -")
+    run(
+        f"kubectl create secret generic grafana-admin-secret -n monitoring "
+        f"--from-literal=admin-user=admin "
+        f"--from-literal=admin-password={grafana_pass} "
+        f"--dry-run=client -o yaml | kubectl apply -f -"
+    )
+    log("OK", "grafana-admin-secret ready in monitoring namespace")
+
     # Apply App of Apps
     run("kubectl apply -f argocd/app-of-apps.yaml")
     log("OK", "App of Apps applied — sync waves starting")
