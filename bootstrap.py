@@ -825,11 +825,16 @@ def phase3_github_secrets(state: dict):
 
     client_id = tf("cicd_client_id")
     if not client_id:
-        # Terraform hasn't run yet — look up by display name
-        client_id = capture(
-            "az ad sp list --display-name peerisland-prod-cicd --query [0].appId -o tsv",
-            check=False,
+        # Terraform hasn't run yet — read from state if available
+        # (avoid az ad app list which picks an arbitrary orphan when multiple exist)
+        tf_state_raw = capture(
+            "terraform state show azuread_application.cicd",
+            cwd=tf_dir, check=False,
         )
+        for line in tf_state_raw.splitlines():
+            if "client_id" in line and "=" in line:
+                client_id = line.split("=")[-1].strip().strip('"')
+                break
 
     tenant_id_val = tf("cicd_tenant_id") or tid
     sub_id_val    = tf("cicd_subscription_id") or sub
@@ -1793,10 +1798,19 @@ def _refresh_github_secrets(state: dict, org: str, repo_name: str):
     def tf(key: str) -> str:
         return tf_outs.get(key, {}).get("value", "") or ""
 
-    client_id  = tf("cicd_client_id") or capture(
-        "az ad sp list --display-name peerisland-prod-cicd --query [0].appId -o tsv",
-        check=False,
-    ).strip()
+    # Use terraform output as the authoritative source — az ad app list returns
+    # the first of potentially multiple orphan apps with the same display name.
+    client_id  = tf("cicd_client_id")
+    if not client_id:
+        # Fallback: get appId by matching the object ID that Terraform state knows
+        tf_state_raw = capture(
+            "terraform state show azuread_application.cicd",
+            cwd=tf_dir, check=False,
+        )
+        for line in tf_state_raw.splitlines():
+            if "client_id" in line and "=" in line:
+                client_id = line.split("=")[-1].strip().strip('"')
+                break
     tenant_id  = tf("cicd_tenant_id")  or state["data"].get("tenant_id", "")
     sub_id     = tf("cicd_subscription_id") or state["data"].get("subscription_id", "")
     acr_name   = state["data"].get("acr_name",          "peerislandprodacr")
