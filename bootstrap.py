@@ -637,7 +637,7 @@ def phase4_terraform(state: dict):
     phase_header(4, "Provision Azure infrastructure (Terraform)")
     tf_dir = REPO_ROOT / "terraform"
 
-    run("terraform init",              cwd=tf_dir)
+    run("terraform init -upgrade",     cwd=tf_dir)
     run("terraform validate",          cwd=tf_dir)
     run("terraform plan -out=tfplan",  cwd=tf_dir)
 
