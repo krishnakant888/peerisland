@@ -13,15 +13,22 @@ data:
       grpc_listen_port: 9095
       log_level: info
 
+    memberlist:
+      join_members:
+        - localhost
+
     blocks_storage:
       backend: filesystem
       filesystem:
         dir: /data/blocks
+      tsdb:
+        dir: /data/tsdb
+
+    compactor:
+      data_dir: /data/compactor
+      blocks_retention_period: 720h
 
     ruler_storage:
       backend: filesystem
       filesystem:
         dir: /data/ruler
-
-    compactor:
-      blocks_retention_period: 720h
