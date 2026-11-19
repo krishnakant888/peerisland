@@ -1544,6 +1544,9 @@ def phase8_wait_argocd(state: dict):
     # call every time Phase 8 runs.
     _ensure_argocd_resources_patched()
 
+    # Show current app status so the user can see what ArgoCD sees at the start
+    _print_argocd_status_table("ArgoCD Apps — initial state")
+
     # Print access credentials so the user can log in while sync is in progress
     argocd_pw    = state["data"].get("argocd_password", "")
     grafana_pw   = state["data"].get("grafana_admin_password", "")
@@ -2411,6 +2414,39 @@ def _start_argocd_widget():
         _argocd_widget.start()
 
 
+def _print_argocd_status_table(label: str = "ArgoCD Apps"):
+    """Print a one-line-per-app status table. Called at Phase 8 start and after fixes."""
+    r = subprocess.run(
+        "kubectl get applications -n argocd -o json",
+        shell=True, capture_output=True, text=True,
+    )
+    if r.returncode != 0:
+        log("WARN", f"kubectl get applications failed: {r.stderr.strip()[:120]}")
+        return {}
+    try:
+        items = json.loads(r.stdout).get("items", [])
+    except Exception:
+        return {}
+    sep = "─" * 70
+    print(f"\n  {bold(label)}  ({len(items)} found)")
+    print(f"  {dim(sep)}")
+    for a in sorted(items, key=lambda x: x["metadata"]["name"]):
+        name   = a["metadata"]["name"]
+        s      = a.get("status", {})
+        sync   = s.get("sync",   {}).get("status", "Unknown")
+        health = s.get("health", {}).get("status", "Unknown")
+        ok     = sync == "Synced" and health in ("Healthy", "Progressing")
+        icon   = green("✓") if ok else red("✗")
+        cond_msgs = [c.get("message", "") for c in s.get("conditions", [])]
+        hmsg      = s.get("health", {}).get("message", "")
+        errs      = [m for m in (cond_msgs + [hmsg]) if m]
+        print(f"  {icon}  {name:<42}  {dim(sync + '/' + health)}")
+        for e in errs[:2]:
+            print(f"       {yellow(e[:100])}")
+    print(f"  {dim(sep)}\n")
+    return {a["metadata"]["name"]: a.get("status", {}) for a in items}
+
+
 def _ensure_argocd_resources_patched():
     """
     Apply (or re-apply) argocd-values.yaml via helm upgrade so that resource
@@ -2942,7 +2978,7 @@ def main():
     parser.add_argument("--list",     dest="list_phases", action="store_true",
                         help="List all phases and exit")
     parser.add_argument("--diagnose", dest="diagnose",    action="store_true",
-                        help="Install kubelogin, refresh kubeconfig, show ArgoCD status + auto-fix unhealthy apps")
+                        help="Show ArgoCD app status table (read-only). Fixing is handled by the phases.")
     args = parser.parse_args()
 
     if args.list_phases:
@@ -2953,92 +2989,7 @@ def main():
         state = load_state()
         _ensure_tools_on_path()
         _ensure_kubectl_auth(state)
-
-        # Apply resource limits + repo-server replicas=2 first so the cluster is
-        # in the right shape before we diagnose / fix apps.  This is safe to run
-        # even when ArgoCD is healthy — helm upgrade is a no-op when nothing changed.
-        _ensure_argocd_resources_patched()
-
-        # Build app status table and diagnose
-        r = subprocess.run(
-            "kubectl get applications -n argocd -o json",
-            shell=True, capture_output=True, text=True,
-        )
-        if r.returncode != 0:
-            die(f"kubectl get applications failed: {r.stderr}")
-        items = json.loads(r.stdout).get("items", [])
-        status = {a["metadata"]["name"]: a.get("status", {}) for a in items}
-        print(f"\n  {bold('ArgoCD Apps')}  ({len(status)} found)")
-        sep = "─" * 70
-        print(f"  {dim(sep)}")
-        for name, s in sorted(status.items()):
-            sync   = s.get("sync",   {}).get("status", "Unknown")
-            health = s.get("health", {}).get("status", "Unknown")
-            ok     = sync == "Synced" and health in ("Healthy", "Progressing")
-            icon   = green("✓") if ok else red("✗")
-            cond_msgs = [c.get("message", "") for c in s.get("conditions", [])]
-            hmsg   = s.get("health", {}).get("message", "")
-            errs   = [m for m in (cond_msgs + [hmsg]) if m]
-            print(f"  {icon}  {name:<42}  {dim(sync + '/' + health)}")
-            for e in errs[:2]:
-                print(f"       {yellow(e[:100])}")
-        print(f"  {dim(sep)}\n")
-
-        # Apply fixes for all unhealthy apps
-        expected_all = [a["metadata"]["name"] for a in items]
-        # Temporarily patch expected list for _diagnose_and_fix_unhealthy
-        # (it's defined inside phase8 so we call directly here)
-        log("INFO", "Running auto-fix pass …")
-
-        # Global rpc check — shared helper used by Phase 8, Phase 9, and here
-        if _argocd_global_rpc_check_and_fix():
-            log("OK", "rpc fix applied — re-fetching app status …")
-            # Refresh status table after fix
-            r2 = subprocess.run("kubectl get applications -n argocd -o json",
-                                shell=True, capture_output=True, text=True)
-            if r2.returncode == 0:
-                items2 = json.loads(r2.stdout).get("items", [])
-                status = {a["metadata"]["name"]: a.get("status", {}) for a in items2}
-                print(f"\n  {bold('Updated ArgoCD Status')}")
-                print(f"  {dim(sep)}")
-                for name2, s2 in sorted(status.items()):
-                    sync2   = s2.get("sync",   {}).get("status", "Unknown")
-                    health2 = s2.get("health", {}).get("status", "Unknown")
-                    ok2     = sync2 == "Synced" and health2 in ("Healthy", "Progressing")
-                    icon2   = green("✓") if ok2 else red("✗")
-                    print(f"  {icon2}  {name2:<42}  {dim(sync2 + '/' + health2)}")
-                print(f"  {dim(sep)}\n")
-        else:
-            # Per-app targeted fixes
-            for name, s in status.items():
-                sync   = s.get("sync",   {}).get("status", "Unknown")
-                health = s.get("health", {}).get("status", "Unknown")
-                if sync == "Synced" and health in ("Healthy", "Progressing"):
-                    continue
-                cond_msgs = [c.get("message", "") for c in s.get("conditions", [])]
-                hmsg      = s.get("health", {}).get("message", "")
-                all_text  = " ".join(cond_msgs + [hmsg]).lower()
-                if "rpc" in all_text or "failed to generate manifest" in all_text:
-                    log("WARN", f"  {name}: rpc error — hard-refreshing")
-                    subprocess.run(
-                        f"kubectl annotate application {name} -n argocd "
-                        f"argocd.argoproj.io/refresh=hard --overwrite",
-                        shell=True, capture_output=True,
-                    )
-                elif sync == "OutOfSync":
-                    log("WARN", f"  {name}: OutOfSync — syncing")
-                    subprocess.run(f"argocd app sync {name} --force --async",
-                                   shell=True, capture_output=True)
-                elif "imagepullbackoff" in all_text or "errimagepull" in all_text:
-                    log("WARN", f"  {name}: ImagePull error — images not in ACR yet")
-                elif sync == "Unknown" or health == "Unknown":
-                    log("WARN", f"  {name}: Unknown — hard-refreshing")
-                    subprocess.run(
-                        f"kubectl annotate application {name} -n argocd "
-                        f"argocd.argoproj.io/refresh=hard --overwrite",
-                        shell=True, capture_output=True,
-                    )
-            log("OK", "Per-app fix pass done — re-run --diagnose in 30 s to see updated status")
+        _print_argocd_status_table("ArgoCD Apps")
         return
 
     DRY_RUN = args.dry_run
