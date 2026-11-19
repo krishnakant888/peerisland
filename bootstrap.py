@@ -1590,7 +1590,8 @@ def phase7_argocd(state: dict):
     if not _le_email:
         _le_email = capture("gh api user --jq .email", check=False).strip()
     if not _le_email:
-        _le_email = input(f"  {cyan('Email for Let'\''s Encrypt expiry notices')}: ").strip()
+        _le_prompt = cyan("Email for Let's Encrypt expiry notices")
+        _le_email = input(f"  {_le_prompt}: ").strip()
     if _le_email:
         state["data"]["letsencrypt_email"] = _le_email
         save_state(state)
