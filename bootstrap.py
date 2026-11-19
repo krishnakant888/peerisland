@@ -928,10 +928,36 @@ def _terraform_drift_apply(state: dict):
     apply_r = subprocess.run(
         "terraform apply -auto-approve tfplan",
         shell=True, cwd=str(tf_dir),
-        text=True, encoding="utf-8", errors="replace",
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
     )
+    if apply_r.stdout:
+        print(apply_r.stdout, end="")
     if apply_r.returncode != 0:
-        log("WARN", "Terraform auto-apply failed — continuing (manual apply may be needed)")
+        apply_err = apply_r.stderr or apply_r.stdout or ""
+        # apply also hits the lock — extract ID and force-unlock then retry
+        if "state blob is already locked" in apply_err.lower() or "error acquiring the state lock" in apply_err.lower():
+            lock_id = ""
+            for line in apply_err.splitlines():
+                if "ID:" in line:
+                    lock_id = line.split("ID:")[-1].strip()
+                    break
+            if lock_id:
+                log("WARN", f"Stale lock on apply (ID: {lock_id}) — force-unlocking and retrying …")
+                subprocess.run(f"terraform force-unlock -force {lock_id}",
+                               shell=True, cwd=str(tf_dir), capture_output=True)
+                retry_r = subprocess.run(
+                    "terraform apply -auto-approve tfplan",
+                    shell=True, cwd=str(tf_dir),
+                    text=True, encoding="utf-8", errors="replace",
+                )
+                if retry_r.returncode != 0:
+                    log("WARN", "Terraform auto-apply failed after unlock — continuing (manual apply may be needed)")
+                else:
+                    log("OK", "Terraform drift resolved")
+                return
+        log("WARN", f"Terraform auto-apply failed — continuing (manual apply may be needed)")
+        if apply_err:
+            log("WARN", apply_err[:300])
     else:
         log("OK", "Terraform drift resolved")
 
