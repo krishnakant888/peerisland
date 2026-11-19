@@ -399,10 +399,11 @@ _TOOLS_DIR = Path(os.environ.get("LOCALAPPDATA", "C:/Users/Public")) / "Programs
 
 # Pinned versions — update here to upgrade
 _VERSIONS = {
-    "terraform": "1.9.8",
-    "argocd":    "v2.12.0",
-    "kustomize": "v5.4.3",
-    "kubectl":   "",          # fetched dynamically from dl.k8s.io/release/stable.txt
+    "terraform":             "1.9.8",
+    "argocd":                "v2.12.0",
+    "kustomize":             "v5.4.3",
+    "kubectl":               "",       # fetched dynamically from dl.k8s.io/release/stable.txt
+    "kubectl-argo-rollouts": "v1.7.2",
 }
 
 
@@ -504,6 +505,13 @@ def _install_win(tool: str) -> bool:
             _fetch(url, _TOOLS_DIR / "argocd.exe")
             log("OK", f"argocd {v} → {_TOOLS_DIR}")
 
+        elif tool == "kubectl-argo-rollouts":
+            v = _VERSIONS["kubectl-argo-rollouts"]
+            url = (f"https://github.com/argoproj/argo-rollouts/releases/download/{v}/"
+                   f"kubectl-argo-rollouts-windows-amd64")
+            _fetch(url, _TOOLS_DIR / "kubectl-argo-rollouts.exe")
+            log("OK", f"kubectl-argo-rollouts {v} → {_TOOLS_DIR}")
+
         elif tool == "kustomize":
             # kustomize mono-repo has many sub-module releases; page through until we find
             # a kustomize/vX.Y.Z release that has a windows_amd64 .tar.gz asset.
@@ -600,6 +608,14 @@ def _install_linux(tool: str) -> bool:
                f"https://github.com/argoproj/argo-cd/releases/download/{v}/argocd-linux-amd64 && "
                "chmod +x /tmp/argocd && sudo mv /tmp/argocd /usr/local/bin/argocd")
 
+        elif tool == "kubectl-argo-rollouts":
+            v = _VERSIONS["kubectl-argo-rollouts"]
+            sh(f"curl -sSL -o /tmp/kubectl-argo-rollouts "
+               f"https://github.com/argoproj/argo-rollouts/releases/download/{v}/"
+               f"kubectl-argo-rollouts-linux-amd64 && "
+               "chmod +x /tmp/kubectl-argo-rollouts && "
+               "sudo mv /tmp/kubectl-argo-rollouts /usr/local/bin/kubectl-argo-rollouts")
+
         elif tool == "kustomize":
             sh("curl -s \"https://raw.githubusercontent.com/kubernetes-sigs/kustomize/"
                "master/hack/install_kustomize.sh\" | bash && "
@@ -619,7 +635,7 @@ def _auto_install(tool: str) -> bool:
 
 
 # Tools that can be auto-installed on demand
-_AUTO_INSTALLABLE = {"terraform", "az", "kubectl", "kubelogin", "helm", "argocd", "kustomize"}
+_AUTO_INSTALLABLE = {"terraform", "az", "kubectl", "kubelogin", "helm", "argocd", "kustomize", "kubectl-argo-rollouts"}
 
 # Track which tools have already been verified this session to avoid re-checking
 _verified_tools: set[str] = set()
@@ -2689,7 +2705,7 @@ def phase9_first_build(state: dict):
 def _rollout_status_summary(svc: str) -> dict:
     """Return a dict with phase, desired, ready, available, message from the Rollout."""
     r = subprocess.run(
-        f"kubectl get rollout {svc} -n peerisland -o json",
+        f"kubectl argo rollouts get rollout {svc} -n peerisland -o json",
         shell=True, capture_output=True, text=True,
     )
     if r.returncode != 0 or not r.stdout.strip():
@@ -2711,6 +2727,7 @@ def _rollout_status_summary(svc: str) -> dict:
 
 def phase10_rollouts(state: dict):
     phase_header(10, "Watch & promote Rollouts (first deploy)")
+    _require_tool("kubectl-argo-rollouts")
     _start_argocd_widget()  # idempotent — already running from phase 9
     _argocd_global_rpc_check_and_fix()  # ensure controller is healthy before watching rollouts
 
@@ -2738,8 +2755,7 @@ def phase10_rollouts(state: dict):
             die(f"{svc} Rollout did not reach Paused within 300s. Last phase={info['phase']} message={info['message']!r}")
 
         log("OK", f"{svc}: promoting (first deploy — no manual traffic gate needed)")
-        run(f"kubectl patch rollout {svc} -n peerisland --type=merge -p '{{\"spec\":{{\"paused\":false}}}}'")
-
+        run(f"kubectl argo rollouts promote {svc} -n peerisland")
 
     # ── Confirm both reach Healthy ────────────────────────────────────────────
     for svc in ("backend", "frontend"):
