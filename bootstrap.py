@@ -1561,23 +1561,15 @@ def phase7_argocd(state: dict):
     org       = state["data"].get("github_org",  "")
     repo_name = state["data"].get("github_repo", "")
 
-    # Patch placeholder org/domain in ArgoCD and k8s YAML files.
-    # <YOUR_ORG>   → github_org from state (set in phase 1 from git remote)
-    # <YOUR_DOMAIN> → app_domain from state if set; otherwise left as-is (manual DNS optional)
-    domain = state["data"].get("app_domain", "")
-    yaml_dirs = [REPO_ROOT / "argocd", REPO_ROOT / "k8s"]
-    for yaml_dir in yaml_dirs:
-        for yaml_path in yaml_dir.rglob("*.yaml"):
+    # Patch <YOUR_ORG> placeholder in ArgoCD YAML files with the actual GitHub org
+    if org and repo_name:
+        for yaml_path in (REPO_ROOT / "argocd").rglob("*.yaml"):
             text = yaml_path.read_text(encoding="utf-8", errors="replace")
             updated = False
-            if org and repo_name:
-                for placeholder in ("<YOUR_ORG>", "YOUR_ORG", "your-org"):
-                    if placeholder in text:
-                        text    = text.replace(placeholder, org)
-                        updated = True
-            if domain and "<YOUR_DOMAIN>" in text:
-                text    = text.replace("<YOUR_DOMAIN>", domain)
-                updated = True
+            for placeholder in ("<YOUR_ORG>", "YOUR_ORG", "your-org"):
+                if placeholder in text:
+                    text    = text.replace(placeholder, org)
+                    updated = True
             if updated:
                 yaml_path.write_text(text, encoding="utf-8")
                 log("OK", f"Patched {yaml_path.relative_to(REPO_ROOT)}")

@@ -1,6 +1,3 @@
-global:
-  domain: argocd.peerisland.<YOUR_DOMAIN>
-
 # ArgoCD is platform infrastructure — it belongs on the system node alongside
 # kube-system components, not competing with application workloads on user nodes.
 # All components are pinned to the system node so they communicate locally
@@ -68,14 +65,8 @@ server:
     enabled: true
     ingressClassName: nginx
     annotations:
-      nginx.ingress.kubernetes.io/ssl-redirect: "true"
+      nginx.ingress.kubernetes.io/ssl-redirect: "false"
       nginx.ingress.kubernetes.io/backend-protocol: "HTTPS"
-    hosts:
-      - argocd.peerisland.<YOUR_DOMAIN>
-    tls:
-      - hosts:
-          - argocd.peerisland.<YOUR_DOMAIN>
-        secretName: argocd-tls
 
 # ── ApplicationSet Controller ─────────────────────────────────────────────────
 applicationSet:
