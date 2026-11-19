@@ -1210,19 +1210,27 @@ def _ensure_vcpu_quota(state: dict, vcpus_needed: int = 8):
     ver    = m.group(4) or ""    # v5 (keep lowercase as Azure expects)
     family = f"standard{series}{suffix}{ver}Family"  # standardDSv5Family
 
-    # ── Check current usage via az vm list-usage ─────────────────────────────
+    # ── Check current usage — fetch all items, filter in Python ──────────────
     cur = subprocess.run(
-        f"az vm list-usage --location {location} "
-        f"--query \"[?name.value=='{family}'].{{limit:limit,used:currentValue}}\" -o json",
+        f"az vm list-usage --location {location} -o json",
         shell=True, capture_output=True, text=True, encoding="utf-8", errors="replace",
     )
     if cur.returncode == 0:
         try:
             rows = _json.loads(cur.stdout)
-            if rows:
-                used  = rows[0].get("used", 0)
-                limit = rows[0].get("limit", 0)
+            # find by exact value OR fuzzy match on localizedValue
+            matched = next(
+                (r for r in rows
+                 if r.get("name", {}).get("value", "").lower() == family.lower()
+                 or family.lower() in r.get("name", {}).get("localizedValue", "").lower().replace(" ", "")),
+                None,
+            )
+            if matched:
+                used  = matched.get("currentValue", 0)
+                limit = matched.get("limit", 0)
                 avail = int(limit) - int(used)
+                actual_family = matched["name"]["value"]
+                family = actual_family  # use whatever Azure calls it
                 log("INFO", f"vCPU quota [{family}]: limit={limit}, used={used}, available={avail}")
                 if avail >= vcpus_needed:
                     log("OK", f"Sufficient vCPU quota ({avail} free, need {vcpus_needed})")
@@ -1241,7 +1249,7 @@ def _ensure_vcpu_quota(state: dict, vcpus_needed: int = 8):
     scope = f"/subscriptions/{sub_id}/providers/Microsoft.Compute/locations/{location}"
     r = subprocess.run(
         f"az quota update --resource-name {family} --scope \"{scope}\" "
-        f"--limit-object limitObjectType=LimitValue value={new_limit} -o json",
+        f"--limit-object value={new_limit} -o json",
         shell=True, capture_output=True, text=True, encoding="utf-8", errors="replace",
     )
 
