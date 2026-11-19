@@ -1,0 +1,41 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: monitoring-alloy
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"   # ConfigMap (wave 0) must exist first
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+
+  sources:
+    - repoURL: https://grafana.github.io/helm-charts
+      chart: alloy
+      targetRevision: "0.9.1"
+      helm:
+        valueFiles:
+          - $values/monitoring/alloy-values.yaml
+
+    - repoURL: https://github.com/<YOUR_ORG>/peerisland.git
+      targetRevision: HEAD
+      ref: values
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: monitoring
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+
+  # Alloy runs as a DaemonSet — replica count is not applicable
+  ignoreDifferences:
+    - group: apps
+      kind: DaemonSet
+      jsonPointers:
+        - /spec/updateStrategy

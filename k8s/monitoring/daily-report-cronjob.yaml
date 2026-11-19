@@ -1,0 +1,102 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: daily-report-script
+  namespace: monitoring
+data:
+  generate-report.sh: |
+    #!/bin/sh
+    set -e
+
+    PROMETHEUS_URL="${PROMETHEUS_URL:-http://mimir.monitoring.svc.cluster.local:8080/prometheus}"
+    DATE=$(date -u +"%Y-%m-%d")
+    RANGE="24h"
+
+    query() {
+      curl -sf "${PROMETHEUS_URL}/api/v1/query?query=$(printf '%s' "$1" | jq -sRr @uri)" \
+        | jq -r '.data.result[0].value[1] // "N/A"'
+    }
+
+    echo "============================================"
+    echo " PeerIsland Daily Performance Report"
+    echo " Date: $DATE"
+    echo "============================================"
+    echo ""
+
+    echo "--- Request Metrics (last 24h) ---"
+    TOTAL=$(query "sum(increase(http_requests_total{namespace=\"peerisland\"}[${RANGE}]))")
+    ERROR=$(query "sum(increase(http_requests_total{namespace=\"peerisland\",status_code=~\"5..\"}[${RANGE}]))")
+    echo "  Total requests    : $TOTAL"
+    echo "  5xx errors        : $ERROR"
+
+    echo ""
+    echo "--- Latency (last 24h) ---"
+    P50=$(query "histogram_quantile(0.50,sum(rate(http_request_duration_seconds_bucket{namespace=\"peerisland\"}[${RANGE}]))by(le))")
+    P95=$(query "histogram_quantile(0.95,sum(rate(http_request_duration_seconds_bucket{namespace=\"peerisland\"}[${RANGE}]))by(le))")
+    P99=$(query "histogram_quantile(0.99,sum(rate(http_request_duration_seconds_bucket{namespace=\"peerisland\"}[${RANGE}]))by(le))")
+    echo "  p50               : ${P50}s"
+    echo "  p95               : ${P95}s"
+    echo "  p99               : ${P99}s"
+
+    echo ""
+    echo "--- Resource Usage (current) ---"
+    CPU=$(query "sum(rate(container_cpu_usage_seconds_total{namespace=\"peerisland\",container!=\"\"}[5m]))")
+    MEM=$(query "sum(container_memory_working_set_bytes{namespace=\"peerisland\",container!=\"\"})")
+    echo "  CPU cores used    : $CPU"
+    echo "  Memory bytes used : $MEM"
+
+    echo ""
+    echo "--- Pod Health ---"
+    RESTARTS=$(query "sum(increase(kube_pod_container_status_restarts_total{namespace=\"peerisland\"}[${RANGE}]))")
+    echo "  Restarts (24h)    : $RESTARTS"
+
+    echo ""
+    echo "============================================"
+    echo " Report complete"
+    echo "============================================"
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: daily-report
+  namespace: monitoring
+spec:
+  schedule: "0 7 * * *"  # 07:00 UTC daily
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 7
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          restartPolicy: OnFailure
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65534
+          containers:
+            - name: reporter
+              image: alpine/curl:latest
+              command: ["/bin/sh", "/scripts/generate-report.sh"]
+              env:
+                - name: PROMETHEUS_URL
+                  value: "http://mimir.monitoring.svc.cluster.local:8080/prometheus"
+              resources:
+                requests:
+                  cpu: "50m"
+                  memory: "32Mi"
+                limits:
+                  cpu: "100m"
+                  memory: "64Mi"
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              volumeMounts:
+                - name: scripts
+                  mountPath: /scripts
+          volumes:
+            - name: scripts
+              configMap:
+                name: daily-report-script
+                defaultMode: 0555

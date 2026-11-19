@@ -1,0 +1,76 @@
+# The Alloy configuration lives in monitoring/alloy/config.alloy and is deployed as
+# ConfigMap "alloy-config" via monitoring/alloy/kustomization.yaml (ArgoCD Application
+# monitoring-alloy-config syncs that path first).
+# Per-cluster endpoints are set via extraEnv below.
+
+crds:
+  create: false
+
+controller:
+  type: daemonset
+  volumes:
+    extra:
+      - name: tmp
+        emptyDir: {}
+  podLabels:
+    platform.io/api-access: "true"   # NetworkPolicy allows API server + kubelet egress
+
+alloy:
+  stabilityLevel: generally-available
+  mounts:
+    extra:
+      - name: tmp
+        mountPath: /tmp
+  extraPorts:
+    - name: otlp-grpc
+      port: 4317
+      targetPort: 4317
+      protocol: TCP
+    - name: otlp-http
+      port: 4318
+      targetPort: 4318
+      protocol: TCP
+  configMap:
+    create: false          # ConfigMap is created by monitoring/alloy/kustomization.yaml
+    name: alloy-config
+    key: config.alloy
+  extraEnv:
+    - name: CLUSTER
+      value: "peerisland-prod"
+    - name: MIMIR_PUSH_URL
+      value: "http://mimir.monitoring.svc.cluster.local:8080/api/v1/push"
+    - name: LOKI_PUSH_URL
+      value: "http://loki.monitoring.svc.cluster.local:3100/loki/api/v1/push"
+    - name: TEMPO_OTLP
+      value: "tempo.monitoring.svc.cluster.local:4317"
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    runAsNonRoot: true
+    runAsUser: 473
+    capabilities:
+      drop: [ALL]
+    seccompProfile:
+      type: RuntimeDefault
+
+clusterRole:
+  create: true
+
+serviceAccount:
+  create: true
+
+serviceMonitor:
+  enabled: false
+
+configReloader:
+  resources:
+    requests: {cpu: 10m, memory: 64Mi}
+    limits: {memory: 128Mi}
+
+resources:
+  requests:
+    cpu: 200m
+    memory: 256Mi
+  limits:
+    cpu: 1000m
+    memory: 1Gi

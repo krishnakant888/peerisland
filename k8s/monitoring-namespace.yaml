@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: monitoring
+  labels:
+    # Required by k8s/network-policy.yaml — allows Alloy to scrape backend pods
+    kubernetes.io/metadata.name: monitoring

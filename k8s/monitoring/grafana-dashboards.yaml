@@ -1,0 +1,187 @@
+# Dashboard ConfigMaps — loaded automatically by the Grafana sidecar (sidecar.dashboards.enabled=true).
+# Label grafana_dashboard="1" triggers the sidecar to pick the ConfigMap up.
+# Annotation grafana_folder sets the Grafana folder name.
+#
+# To add a new dashboard: add a new ConfigMap here following the same pattern.
+# The sidecar hot-reloads without a Grafana restart.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dashboard-app
+  namespace: monitoring
+  labels:
+    grafana_dashboard: "1"
+  annotations:
+    grafana_folder: PeerIsland
+data:
+  app-dashboard.json: |
+    {
+      "title": "PeerIsland Application Dashboard",
+      "uid": "peerisland-app",
+      "schemaVersion": 38,
+      "version": 1,
+      "refresh": "1m",
+      "time": {"from": "now-6h", "to": "now"},
+      "tags": ["peerisland", "application"],
+      "panels": [
+        {"id": 1, "type": "stat", "title": "Total Request Rate", "gridPos": {"x": 0, "y": 0, "w": 6, "h": 4},
+          "datasource": {"type": "prometheus", "uid": "mimir"},
+          "targets": [{"expr": "sum(rate(http_requests_total{namespace=\"peerisland\"}[5m]))", "legendFormat": "req/s"}],
+          "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "colorMode": "background"},
+          "fieldConfig": {"defaults": {"unit": "reqps", "thresholds": {"steps": [
+            {"color": "green", "value": null}, {"color": "yellow", "value": 50}, {"color": "red", "value": 100}]}}}},
+        {"id": 2, "type": "stat", "title": "Error Rate (%)", "gridPos": {"x": 6, "y": 0, "w": 6, "h": 4},
+          "datasource": {"type": "prometheus", "uid": "mimir"},
+          "targets": [{"expr": "100 * sum(rate(http_requests_total{namespace=\"peerisland\",status_code=~\"5..\"}[5m])) / sum(rate(http_requests_total{namespace=\"peerisland\"}[5m]))", "legendFormat": "error %"}],
+          "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "colorMode": "background"},
+          "fieldConfig": {"defaults": {"unit": "percent", "thresholds": {"steps": [
+            {"color": "green", "value": null}, {"color": "yellow", "value": 1}, {"color": "red", "value": 5}]}}}},
+        {"id": 3, "type": "stat", "title": "P99 Latency", "gridPos": {"x": 12, "y": 0, "w": 6, "h": 4},
+          "datasource": {"type": "prometheus", "uid": "mimir"},
+          "targets": [{"expr": "histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket{namespace=\"peerisland\"}[5m])) by (le))", "legendFormat": "p99"}],
+          "fieldConfig": {"defaults": {"unit": "s", "thresholds": {"steps": [
+            {"color": "green", "value": null}, {"color": "yellow", "value": 0.5}, {"color": "red", "value": 2}]}}}},
+        {"id": 4, "type": "stat", "title": "Running Pods", "gridPos": {"x": 18, "y": 0, "w": 6, "h": 4},
+          "datasource": {"type": "prometheus", "uid": "mimir"},
+          "targets": [{"expr": "count(kube_pod_status_phase{namespace=\"peerisland\",phase=\"Running\"})", "legendFormat": "pods"}],
+          "fieldConfig": {"defaults": {"thresholds": {"steps": [
+            {"color": "red", "value": null}, {"color": "yellow", "value": 2}, {"color": "green", "value": 4}]}}}},
+        {"id": 5, "type": "timeseries", "title": "HTTP Request Rate by Status", "gridPos": {"x": 0, "y": 4, "w": 12, "h": 8},
+          "datasource": {"type": "prometheus", "uid": "mimir"},
+          "targets": [
+            {"expr": "sum(rate(http_requests_total{namespace=\"peerisland\",status_code=~\"2..\"}[5m]))", "legendFormat": "2xx"},
+            {"expr": "sum(rate(http_requests_total{namespace=\"peerisland\",status_code=~\"4..\"}[5m]))", "legendFormat": "4xx"},
+            {"expr": "sum(rate(http_requests_total{namespace=\"peerisland\",status_code=~\"5..\"}[5m]))", "legendFormat": "5xx"}],
+          "fieldConfig": {"defaults": {"unit": "reqps"}}},
+        {"id": 6, "type": "timeseries", "title": "Latency Percentiles (with Exemplars)", "gridPos": {"x": 12, "y": 4, "w": 12, "h": 8},
+          "datasource": {"type": "prometheus", "uid": "mimir"},
+          "targets": [
+            {"expr": "histogram_quantile(0.50, sum(rate(http_request_duration_seconds_bucket{namespace=\"peerisland\"}[5m])) by (le))", "legendFormat": "p50", "exemplar": true},
+            {"expr": "histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket{namespace=\"peerisland\"}[5m])) by (le))", "legendFormat": "p95", "exemplar": true},
+            {"expr": "histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket{namespace=\"peerisland\"}[5m])) by (le))", "legendFormat": "p99", "exemplar": true}],
+          "fieldConfig": {"defaults": {"unit": "s"}}},
+        {"id": 7, "type": "timeseries", "title": "CPU Usage by Pod", "gridPos": {"x": 0, "y": 12, "w": 12, "h": 8},
+          "datasource": {"type": "prometheus", "uid": "mimir"},
+          "targets": [{"expr": "sum(rate(container_cpu_usage_seconds_total{namespace=\"peerisland\",container!=\"\"}[5m])) by (pod)", "legendFormat": "{{pod}}"}],
+          "fieldConfig": {"defaults": {"unit": "cores"}}},
+        {"id": 8, "type": "timeseries", "title": "Memory Usage by Pod", "gridPos": {"x": 12, "y": 12, "w": 12, "h": 8},
+          "datasource": {"type": "prometheus", "uid": "mimir"},
+          "targets": [{"expr": "sum(container_memory_working_set_bytes{namespace=\"peerisland\",container!=\"\"}) by (pod)", "legendFormat": "{{pod}}"}],
+          "fieldConfig": {"defaults": {"unit": "bytes"}}},
+        {"id": 9, "type": "timeseries", "title": "Pod Restarts", "gridPos": {"x": 0, "y": 20, "w": 12, "h": 6},
+          "datasource": {"type": "prometheus", "uid": "mimir"},
+          "targets": [{"expr": "increase(kube_pod_container_status_restarts_total{namespace=\"peerisland\"}[1h])", "legendFormat": "{{pod}}/{{container}}"}],
+          "fieldConfig": {"defaults": {"unit": "short"}}},
+        {"id": 10, "type": "timeseries", "title": "Network I/O", "gridPos": {"x": 12, "y": 20, "w": 12, "h": 6},
+          "datasource": {"type": "prometheus", "uid": "mimir"},
+          "targets": [
+            {"expr": "sum(rate(container_network_receive_bytes_total{namespace=\"peerisland\"}[5m]))", "legendFormat": "rx"},
+            {"expr": "sum(rate(container_network_transmit_bytes_total{namespace=\"peerisland\"}[5m]))", "legendFormat": "tx"}],
+          "fieldConfig": {"defaults": {"unit": "Bps"}}},
+        {"id": 11, "type": "traces", "title": "Recent Traces (slow requests > 200ms)", "gridPos": {"x": 0, "y": 26, "w": 24, "h": 10},
+          "datasource": {"type": "tempo", "uid": "tempo"},
+          "targets": [{"datasource": {"type": "tempo", "uid": "tempo"}, "queryType": "traceql",
+            "query": "{ .service.name = \"peerisland-backend\" && .http.target != \"/health\" } | duration > 200ms", "limit": 20}]}
+      ]
+    }
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dashboard-apm
+  namespace: monitoring
+  labels:
+    grafana_dashboard: "1"
+  annotations:
+    grafana_folder: PeerIsland
+data:
+  apm-dashboard.json: |
+    {
+      "title": "PeerIsland APM",
+      "uid": "peerisland-apm",
+      "schemaVersion": 38,
+      "version": 1,
+      "refresh": "1m",
+      "time": {"from": "now-1h", "to": "now"},
+      "tags": ["peerisland", "apm", "traces"],
+      "panels": [
+        {"id": 1, "type": "stat", "title": "Request Rate (RPS)", "gridPos": {"x": 0, "y": 0, "w": 6, "h": 4},
+          "datasource": {"type": "prometheus", "uid": "mimir"},
+          "targets": [{"expr": "sum(rate(http_requests_total{namespace=\"peerisland\"}[5m]))", "legendFormat": "req/s"}],
+          "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "colorMode": "background"},
+          "fieldConfig": {"defaults": {"unit": "reqps"}}},
+        {"id": 2, "type": "stat", "title": "Error Rate (%)", "gridPos": {"x": 6, "y": 0, "w": 6, "h": 4},
+          "datasource": {"type": "prometheus", "uid": "mimir"},
+          "targets": [{"expr": "100 * sum(rate(http_requests_total{namespace=\"peerisland\",status_code=~\"5..\"}[5m])) / sum(rate(http_requests_total{namespace=\"peerisland\"}[5m]))", "legendFormat": "error %"}],
+          "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "colorMode": "background"},
+          "fieldConfig": {"defaults": {"unit": "percent"}}},
+        {"id": 3, "type": "stat", "title": "P99 Latency", "gridPos": {"x": 12, "y": 0, "w": 6, "h": 4},
+          "datasource": {"type": "prometheus", "uid": "mimir"},
+          "targets": [{"expr": "histogram_quantile(0.99, sum by(le) (rate(http_request_duration_seconds_bucket{namespace=\"peerisland\"}[5m])))", "legendFormat": "p99"}],
+          "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "colorMode": "background"},
+          "fieldConfig": {"defaults": {"unit": "s"}}},
+        {"id": 5, "type": "timeseries", "title": "Latency Percentiles Over Time", "gridPos": {"x": 0, "y": 4, "w": 12, "h": 8},
+          "datasource": {"type": "prometheus", "uid": "mimir"},
+          "targets": [
+            {"expr": "histogram_quantile(0.99, sum by(le) (rate(http_request_duration_seconds_bucket{namespace=\"peerisland\"}[5m])))", "legendFormat": "p99"},
+            {"expr": "histogram_quantile(0.95, sum by(le) (rate(http_request_duration_seconds_bucket{namespace=\"peerisland\"}[5m])))", "legendFormat": "p95"},
+            {"expr": "histogram_quantile(0.50, sum by(le) (rate(http_request_duration_seconds_bucket{namespace=\"peerisland\"}[5m])))", "legendFormat": "p50"}],
+          "fieldConfig": {"defaults": {"unit": "s"}}},
+        {"id": 7, "type": "traces", "title": "Recent Traces (slow requests > 200ms)", "gridPos": {"x": 0, "y": 12, "w": 24, "h": 10},
+          "datasource": {"type": "tempo", "uid": "tempo"},
+          "targets": [{"datasource": {"type": "tempo", "uid": "tempo"}, "queryType": "traceql",
+            "query": "{ .http.target != \"/health\" } | duration > 200ms", "limit": 20}]}
+      ]
+    }
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dashboard-infrastructure
+  namespace: monitoring
+  labels:
+    grafana_dashboard: "1"
+  annotations:
+    grafana_folder: PeerIsland
+data:
+  infrastructure-dashboard.json: |
+    {
+      "title": "PeerIsland Infrastructure",
+      "uid": "peerisland-infra",
+      "schemaVersion": 38,
+      "version": 1,
+      "refresh": "2m",
+      "time": {"from": "now-3h", "to": "now"},
+      "tags": ["peerisland", "infrastructure", "k8s"],
+      "panels": [
+        {"id": 1, "type": "timeseries", "title": "Node CPU Usage", "gridPos": {"x": 0, "y": 0, "w": 12, "h": 8},
+          "datasource": {"type": "prometheus", "uid": "mimir"},
+          "targets": [{"expr": "1 - avg by(node) (rate(node_cpu_seconds_total{mode=\"idle\"}[5m]))", "legendFormat": "{{node}}"}],
+          "fieldConfig": {"defaults": {"unit": "percentunit", "max": 1, "min": 0}}},
+        {"id": 2, "type": "timeseries", "title": "Node Memory Usage", "gridPos": {"x": 12, "y": 0, "w": 12, "h": 8},
+          "datasource": {"type": "prometheus", "uid": "mimir"},
+          "targets": [{"expr": "1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)", "legendFormat": "{{instance}}"}],
+          "fieldConfig": {"defaults": {"unit": "percentunit", "max": 1, "min": 0}}},
+        {"id": 3, "type": "table", "title": "Pod Restart Count (last 1h)", "gridPos": {"x": 0, "y": 8, "w": 12, "h": 8},
+          "datasource": {"type": "prometheus", "uid": "mimir"},
+          "targets": [{"expr": "topk(10, increase(kube_pod_container_status_restarts_total{namespace=\"peerisland\"}[1h]))", "legendFormat": "{{pod}}/{{container}}", "instant": true}],
+          "options": {"sortBy": [{"displayName": "Value", "desc": true}]},
+          "fieldConfig": {"defaults": {"unit": "short"}}},
+        {"id": 4, "type": "timeseries", "title": "HPA Replicas (backend)", "gridPos": {"x": 12, "y": 8, "w": 12, "h": 8},
+          "datasource": {"type": "prometheus", "uid": "mimir"},
+          "targets": [
+            {"expr": "kube_horizontalpodautoscaler_status_current_replicas{namespace=\"peerisland\",horizontalpodautoscaler=\"backend\"}", "legendFormat": "current"},
+            {"expr": "kube_horizontalpodautoscaler_status_desired_replicas{namespace=\"peerisland\",horizontalpodautoscaler=\"backend\"}", "legendFormat": "desired"},
+            {"expr": "kube_horizontalpodautoscaler_spec_max_replicas{namespace=\"peerisland\",horizontalpodautoscaler=\"backend\"}", "legendFormat": "max"}],
+          "fieldConfig": {"defaults": {"unit": "short", "min": 0}}},
+        {"id": 5, "type": "timeseries", "title": "Container CPU Usage by Pod", "gridPos": {"x": 0, "y": 16, "w": 12, "h": 8},
+          "datasource": {"type": "prometheus", "uid": "mimir"},
+          "targets": [{"expr": "sum by(pod, container) (rate(container_cpu_usage_seconds_total{namespace=\"peerisland\",container!=\"\"}[5m]))", "legendFormat": "{{pod}}/{{container}}"}],
+          "fieldConfig": {"defaults": {"unit": "cores"}}},
+        {"id": 6, "type": "timeseries", "title": "Container Memory Usage by Pod", "gridPos": {"x": 12, "y": 16, "w": 12, "h": 8},
+          "datasource": {"type": "prometheus", "uid": "mimir"},
+          "targets": [{"expr": "sum by(pod, container) (container_memory_working_set_bytes{namespace=\"peerisland\",container!=\"\"})", "legendFormat": "{{pod}}/{{container}}"}],
+          "fieldConfig": {"defaults": {"unit": "bytes"}}}
+      ]
+    }

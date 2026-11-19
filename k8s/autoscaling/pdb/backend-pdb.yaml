@@ -1,0 +1,16 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: backend
+  namespace: peerisland
+  labels:
+    app: backend
+    component: autoscaling
+spec:
+  # Keep at least 1 pod running during node drains, upgrades, or VPA evictions.
+  # minAvailable: 1 is safer than maxUnavailable: 1 when minReplicas is 2 —
+  # it guarantees availability even if HPA is at its minimum.
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: backend

@@ -1,0 +1,68 @@
+name: Terraform Security Scan
+
+on:
+  pull_request:
+    paths:
+      - "terraform/**"
+  push:
+    branches: [main]
+    paths:
+      - "terraform/**"
+
+jobs:
+  checkov:
+    name: Checkov Scan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write  # Required for SARIF upload
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run Checkov
+        id: checkov
+        uses: bridgecrewio/checkov-action@v12
+        with:
+          directory: terraform/
+          framework: terraform
+          output_format: sarif
+          output_file_path: checkov-results.sarif
+          soft_fail: false
+          skip_check: >-
+            CKV_AZURE_168
+          # CKV_AZURE_168 (private cluster) is skipped because private clusters
+          # require additional VPN/bastion setup outside assignment scope.
+          # Set private_cluster_enabled = true in production.
+
+      - name: Upload SARIF to GitHub Security tab
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: checkov-results.sarif
+
+      - name: Print summary
+        if: always()
+        run: |
+          echo "### Checkov Scan Results" >> $GITHUB_STEP_SUMMARY
+          echo "See Security tab → Code scanning for detailed findings." >> $GITHUB_STEP_SUMMARY
+
+  terrascan:
+    name: Terrascan Scan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run Terrascan
+        uses: tenable/terrascan-action@main
+        with:
+          iac_type: terraform
+          iac_dir: terraform/
+          policy_type: azure
+          only_warn: false
+          sarif_upload: true

@@ -1,0 +1,91 @@
+# Prometheus adapter translates PromQL queries into Kubernetes custom metrics
+# so HPA can scale on application-level signals instead of raw CPU/memory.
+#
+# Install: helm upgrade --install prometheus-adapter \
+#            prometheus-community/prometheus-adapter \
+#            -n monitoring -f monitoring/prometheus-adapter-values.yaml
+
+prometheus:
+  url: http://mimir.monitoring.svc.cluster.local
+  port: 8080
+  path: /prometheus
+
+rules:
+  custom:
+    # ── HTTP requests per second per pod (backend) ───────────────────────
+    # Exposed as: custom.metrics.k8s.io/v1beta1
+    #             namespaces/peerisland/pods/*/http_requests_per_second
+    - seriesQuery: 'http_requests_total{namespace="peerisland",pod!=""}'
+      resources:
+        overrides:
+          namespace: { resource: namespace }
+          pod:       { resource: pod }
+      name:
+        matches: "http_requests_total"
+        as:      "http_requests_per_second"
+      metricsQuery: |
+        sum(rate(http_requests_total{namespace="<<.Namespace>>",pod="<<.Object.Name>>"}[2m]))
+        by (pod)
+
+    # ── p99 latency per pod (backend) ────────────────────────────────────
+    # Exposed as: custom.metrics.k8s.io/v1beta1
+    #             namespaces/peerisland/pods/*/http_request_duration_p99_seconds
+    # Requires the histogram recorded by prom-client in app/backend/src/index.js:22-28
+    - seriesQuery: 'http_request_duration_seconds_bucket{namespace="peerisland",pod!=""}'
+      resources:
+        overrides:
+          namespace: { resource: namespace }
+          pod:       { resource: pod }
+      name:
+        matches: "http_request_duration_seconds_bucket"
+        as:      "http_request_duration_p99_seconds"
+      metricsQuery: |
+        histogram_quantile(0.99,
+          sum(rate(http_request_duration_seconds_bucket{
+            namespace="<<.Namespace>>",pod="<<.Object.Name>>"
+          }[2m])) by (pod, le)
+        )
+
+    # ── Active connections per pod (frontend) ───────────────────────────
+    # Uses the prom-client default metric node_active_handles — replace
+    # with nginx_connections_active if you switch to an nginx image.
+    - seriesQuery: 'process_handles{namespace="peerisland",pod!=""}'
+      resources:
+        overrides:
+          namespace: { resource: namespace }
+          pod:       { resource: pod }
+      name:
+        matches: "process_handles"
+        as:      "nginx_active_connections_per_pod"
+      metricsQuery: |
+        avg(process_handles{namespace="<<.Namespace>>",pod="<<.Object.Name>>"})
+        by (pod)
+
+  # Pass through standard resource metrics unchanged
+  resource:
+    cpu:
+      containerQuery: |
+        sum(rate(container_cpu_usage_seconds_total{<<.LabelMatchers>>,container!=""}[3m]))
+        by (<<.GroupBy>>)
+      nodeQuery: |
+        sum(rate(container_cpu_usage_seconds_total{<<.LabelMatchers>>,id='/'}[3m]))
+        by (<<.GroupBy>>)
+      resources:
+        overrides:
+          node:      { resource: node }
+          namespace: { resource: namespace }
+          pod:       { resource: pod }
+      containerLabel: container
+    memory:
+      containerQuery: |
+        sum(container_memory_working_set_bytes{<<.LabelMatchers>>,container!=""})
+        by (<<.GroupBy>>)
+      nodeQuery: |
+        sum(container_memory_working_set_bytes{<<.LabelMatchers>>,id='/'})
+        by (<<.GroupBy>>)
+      resources:
+        overrides:
+          node:      { resource: node }
+          namespace: { resource: namespace }
+          pod:       { resource: pod }
+      containerLabel: container

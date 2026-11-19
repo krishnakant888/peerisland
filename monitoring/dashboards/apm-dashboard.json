@@ -1,0 +1,136 @@
+{
+  "title": "PeerIsland APM",
+  "uid": "peerisland-apm",
+  "schemaVersion": 38,
+  "version": 1,
+  "refresh": "1m",
+  "time": { "from": "now-1h", "to": "now" },
+  "tags": ["peerisland", "apm", "traces"],
+  "panels": [
+    {
+      "id": 1,
+      "title": "Request Rate (RPS)",
+      "type": "stat",
+      "gridPos": { "x": 0, "y": 0, "w": 6, "h": 4 },
+      "targets": [{
+        "datasource": { "type": "prometheus", "uid": "mimir" },
+        "expr": "sum(rate(http_requests_total{namespace=\"peerisland\"}[5m]))",
+        "legendFormat": "req/s"
+      }],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background" },
+      "fieldConfig": { "defaults": { "unit": "reqps", "thresholds": { "steps": [
+        { "color": "green", "value": null },
+        { "color": "yellow", "value": 50 },
+        { "color": "red", "value": 100 }
+      ]}}}
+    },
+    {
+      "id": 2,
+      "title": "Error Rate (%)",
+      "type": "stat",
+      "gridPos": { "x": 6, "y": 0, "w": 6, "h": 4 },
+      "targets": [{
+        "datasource": { "type": "prometheus", "uid": "mimir" },
+        "expr": "100 * sum(rate(http_requests_total{namespace=\"peerisland\",status_code=~\"5..\"}[5m])) / sum(rate(http_requests_total{namespace=\"peerisland\"}[5m]))",
+        "legendFormat": "error %"
+      }],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background" },
+      "fieldConfig": { "defaults": { "unit": "percent", "thresholds": { "steps": [
+        { "color": "green", "value": null },
+        { "color": "yellow", "value": 1 },
+        { "color": "red", "value": 5 }
+      ]}}}
+    },
+    {
+      "id": 3,
+      "title": "P99 Latency",
+      "type": "stat",
+      "gridPos": { "x": 12, "y": 0, "w": 6, "h": 4 },
+      "targets": [{
+        "datasource": { "type": "prometheus", "uid": "mimir" },
+        "expr": "histogram_quantile(0.99, sum by(le) (rate(http_request_duration_seconds_bucket{namespace=\"peerisland\"}[5m])))",
+        "legendFormat": "p99"
+      }],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background" },
+      "fieldConfig": { "defaults": { "unit": "s", "thresholds": { "steps": [
+        { "color": "green", "value": null },
+        { "color": "yellow", "value": 0.5 },
+        { "color": "red", "value": 1 }
+      ]}}}
+    },
+    {
+      "id": 4,
+      "title": "Active Spans",
+      "type": "stat",
+      "gridPos": { "x": 18, "y": 0, "w": 6, "h": 4 },
+      "targets": [{
+        "datasource": { "type": "prometheus", "uid": "mimir" },
+        "expr": "sum(traces_spanmetrics_calls_total{namespace=\"peerisland\"})",
+        "legendFormat": "total spans"
+      }],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value" },
+      "fieldConfig": { "defaults": { "unit": "short" }}
+    },
+    {
+      "id": 5,
+      "title": "Latency Percentiles Over Time",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 4, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "mimir" },
+          "expr": "histogram_quantile(0.99, sum by(le) (rate(http_request_duration_seconds_bucket{namespace=\"peerisland\"}[5m])))",
+          "legendFormat": "p99"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "mimir" },
+          "expr": "histogram_quantile(0.95, sum by(le) (rate(http_request_duration_seconds_bucket{namespace=\"peerisland\"}[5m])))",
+          "legendFormat": "p95"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "mimir" },
+          "expr": "histogram_quantile(0.50, sum by(le) (rate(http_request_duration_seconds_bucket{namespace=\"peerisland\"}[5m])))",
+          "legendFormat": "p50"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": { "lineWidth": 2 }
+        },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "p99" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "red" }}] },
+          { "matcher": { "id": "byName", "options": "p95" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "orange" }}] },
+          { "matcher": { "id": "byName", "options": "p50" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "green" }}] }
+        ]
+      }
+    },
+    {
+      "id": 6,
+      "title": "Top Endpoints by P99",
+      "type": "table",
+      "gridPos": { "x": 12, "y": 4, "w": 12, "h": 8 },
+      "targets": [{
+        "datasource": { "type": "prometheus", "uid": "mimir" },
+        "expr": "topk(10, histogram_quantile(0.99, sum by(route, le) (rate(http_request_duration_seconds_bucket{namespace=\"peerisland\"}[5m]))))",
+        "legendFormat": "{{route}}",
+        "instant": true
+      }],
+      "options": { "sortBy": [{ "displayName": "Value", "desc": true }] },
+      "fieldConfig": { "defaults": { "unit": "s" }}
+    },
+    {
+      "id": 7,
+      "title": "Recent Traces (slow requests > 200ms)",
+      "type": "traces",
+      "gridPos": { "x": 0, "y": 12, "w": 24, "h": 10 },
+      "datasource": { "type": "tempo", "uid": "tempo" },
+      "targets": [{
+        "datasource": { "type": "tempo", "uid": "tempo" },
+        "queryType": "traceql",
+        "query": "{ .http.target != \"/health\" } | duration > 200ms",
+        "limit": 20
+      }]
+    }
+  ]
+}

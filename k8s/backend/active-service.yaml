@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend-active
+  namespace: peerisland
+  labels:
+    app: backend
+    role: active
+spec:
+  selector:
+    app: backend
+  ports:
+    - name: http
+      port: 80
+      targetPort: 3001
+      protocol: TCP
+  type: ClusterIP

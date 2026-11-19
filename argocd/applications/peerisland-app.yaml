@@ -1,0 +1,45 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: peerisland
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"   # after argo-rollouts CRDs (wave 2); Rollout resource needs them
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+
+  source:
+    # Replace with your actual repository URL
+    repoURL: https://github.com/<YOUR_ORG>/peerisland.git
+    targetRevision: main
+    # ArgoCD syncs from the production overlay — the single source of truth
+    path: k8s/overlays/production
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: peerisland
+
+  syncPolicy:
+    automated:
+      prune: true        # Delete resources removed from Git
+      selfHeal: true     # Re-sync if someone manually edits the cluster
+      allowEmpty: false
+    syncOptions:
+      - CreateNamespace=true
+      - PrunePropagationPolicy=foreground
+      - RespectIgnoreDifferences=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
+
+  # Health assessment overrides
+  ignoreDifferences:
+    - group: argoproj.io
+      kind: Rollout
+      jsonPointers:
+        - /spec/replicas   # HPA manages replicas; ignore drift

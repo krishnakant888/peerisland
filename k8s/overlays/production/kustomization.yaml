@@ -1,0 +1,37 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Point to the shared base manifests
+resources:
+  - ../../
+
+# ArgoCD / CI updates these image tags via:
+#   kustomize edit set image PLACEHOLDER_ACR/backend=<acr>/<repo>:<sha>
+images:
+  - name: PLACEHOLDER_ACR/backend
+    newName: peerislandprodacr.azurecr.io/backend
+    newTag: latest
+  - name: PLACEHOLDER_ACR/frontend
+    newName: peerislandprodacr.azurecr.io/frontend
+    newTag: latest
+
+# Production-specific patches
+patches:
+  - patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 3
+    target:
+      kind: Rollout
+      name: backend
+  - patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 3
+    target:
+      kind: Rollout
+      name: frontend
+
+commonLabels:
+  environment: production
+  managed-by: argocd

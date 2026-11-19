@@ -1,0 +1,84 @@
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: backend
+  namespace: peerisland
+  labels:
+    app: backend
+    component: autoscaling
+spec:
+  scaleTargetRef:
+    apiVersion: argoproj.io/v1alpha1
+    kind: Rollout
+    name: backend
+
+  minReplicas: 2
+  maxReplicas: 20
+
+  metrics:
+    # ── Application-level metric via Prometheus adapter ───────────────────
+    # HPA scales on REQUEST RATE — not CPU/memory — so VPA can freely adjust
+    # resource requests without triggering HPA scale events.
+    #
+    # Requires prometheus-adapter installed (see monitoring/install.sh).
+    # The adapter exposes http_requests_total as a custom metric:
+    #   kubectl get --raw /apis/custom.metrics.k8s.io/v1beta1 | jq .
+    - type: Pods
+      pods:
+        metric:
+          name: http_requests_per_second   # defined in prometheus-adapter config
+        target:
+          type: AverageValue
+          averageValue: "50"               # scale when each pod handles > 50 rps
+
+    # ── p99 latency per pod ──────────────────────────────────────────────
+    # Catches degradation that RPS misses — e.g. a slow endpoint or DB
+    # timeout dragging latency up while RPS stays below the target.
+    # HPA takes MAX(desired from RPS, desired from latency) automatically.
+    # Threshold: 500ms — normal is 1-2ms so this only fires under real stress.
+    - type: Pods
+      pods:
+        metric:
+          name: http_request_duration_p99_seconds
+        target:
+          type: AverageValue
+          averageValue: "0.5"    # scale when p99 latency > 500ms per pod
+
+    # ── CPU as a secondary safety net only ───────────────────────────────
+    # 80% of whatever VPA has set as the request. At peak, VPA may set
+    # the request to 800m — 80% of that is 640m, still 360m below the
+    # 1000m limit. Only fires during genuine runaway load.
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 80
+
+    # Memory is intentionally ABSENT from HPA metrics.
+    # VPA fully owns memory requests. If HPA also scaled on memory %, VPA
+    # adjusting memory requests would change the denominator and cause the
+    # same feedback loop as CPU.
+
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 30
+      policies:
+        - type: Percent
+          value: 100
+          periodSeconds: 15
+        - type: Pods
+          value: 4
+          periodSeconds: 60
+      selectPolicy: Max
+
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Percent
+          value: 10
+          periodSeconds: 60
+        - type: Pods
+          value: 2
+          periodSeconds: 60
+      selectPolicy: Min

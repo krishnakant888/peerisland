@@ -1,0 +1,59 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: argo-rollouts
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+
+  source:
+    repoURL: https://argoproj.github.io/argo-helm
+    chart: argo-rollouts
+    targetRevision: "2.37.6"
+    helm:
+      values: |
+        controller:
+          replicas: 1
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+
+        dashboard:
+          enabled: true
+          service:
+            type: ClusterIP
+          securityContext:
+            runAsNonRoot: true
+
+        # Notifications handled by ArgoCD itself
+        notifications:
+          enabled: false
+
+        serviceAccount:
+          create: true
+          name: argo-rollouts
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argo-rollouts
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true

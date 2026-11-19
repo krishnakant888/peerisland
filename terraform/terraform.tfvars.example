@@ -1,0 +1,45 @@
+# Copy to terraform.tfvars and fill in real values before running terraform apply.
+# terraform.tfvars is gitignored — never commit it.
+
+# ── Basic config ─────────────────────────────────────────────────────────────
+project_name = "peerisland"
+environment  = "prod"
+location     = "eastus"
+
+# ── AKS ──────────────────────────────────────────────────────────────────────
+kubernetes_version = "1.29.9"
+
+# Standard_D4s_v3 = 4 vCPU / 16 GB — minimum for LGTM stack + app pods
+# Standard_D8s_v3 = 8 vCPU / 32 GB — recommended under sustained load
+node_pool_vm_size   = "Standard_D4s_v3"
+node_pool_min_count = 2    # both system and user pool floor
+node_pool_max_count = 10
+
+# API server is locked to these CIDRs — add your CI/CD egress IP and your VPN
+authorized_ip_ranges = [
+  "1.2.3.4/32",   # GitHub Actions runner egress
+  "5.6.7.8/32",   # VPN gateway
+]
+
+# ── Key Vault network ACL ────────────────────────────────────────────────────
+# Public IPs allowed to reach Key Vault during terraform apply.
+# Not needed once you run Terraform from a self-hosted runner inside the VNet.
+# Note: Key Vault network ACL takes single IPs, not CIDRs.
+deployer_ips = [
+  "1.2.3.4",   # CI/CD runner egress IP
+]
+
+# ── GitHub OIDC ──────────────────────────────────────────────────────────────
+# Terraform creates the service principal + federated credential automatically.
+# Just provide your GitHub org and repo name — no manual SP creation needed.
+github_org  = "your-github-org"
+github_repo = "peerisland"
+
+# ── Tags ─────────────────────────────────────────────────────────────────────
+tags = {
+  Project     = "peerisland"
+  Environment = "prod"
+  ManagedBy   = "terraform"
+  Owner       = "platform-team"
+  CostCenter  = "engineering"
+}

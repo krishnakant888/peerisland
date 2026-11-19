@@ -1,0 +1,55 @@
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: frontend
+  namespace: peerisland
+  labels:
+    app: frontend
+    component: autoscaling
+spec:
+  scaleTargetRef:
+    apiVersion: argoproj.io/v1alpha1
+    kind: Rollout
+    name: frontend
+
+  minReplicas: 2
+  maxReplicas: 10
+
+  metrics:
+    # Frontend is a static file server — connections-per-pod is a better
+    # signal than RPS because a single user holds a connection open.
+    # Falls back to CPU (high threshold) if the custom metric is unavailable.
+    - type: Pods
+      pods:
+        metric:
+          name: nginx_active_connections_per_pod
+        target:
+          type: AverageValue
+          averageValue: "200"
+
+    # CPU safety net at 80% — same reasoning as backend.
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 80
+
+    # Memory absent — VPA owns it.
+
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 60
+      policies:
+        - type: Pods
+          value: 2
+          periodSeconds: 60
+      selectPolicy: Max
+
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 120
+      selectPolicy: Min

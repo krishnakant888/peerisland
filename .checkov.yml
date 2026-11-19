@@ -1,0 +1,15 @@
+framework:
+  - terraform
+
+directory:
+  - terraform/
+
+skip-check:
+  - CKV_AZURE_168   # Private cluster — requires Bastion/VPN; documented in terraform-scan-results.md
+
+output:
+  - cli
+  - sarif
+
+soft-fail: false
+compact: true

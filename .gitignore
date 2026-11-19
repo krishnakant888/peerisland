@@ -1,0 +1,40 @@
+# Terraform
+.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.backup
+*.tfplan
+terraform.tfvars
+!terraform.tfvars.example
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# Node.js
+node_modules/
+npm-debug.log*
+.env
+.env.*
+!.env.example
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Secrets
+*.pem
+*.key
+kubeconfig
+*.kubeconfig
+
+# Bootstrap script output (contains credentials)
+.bootstrap-state.json
+bootstrap-summary.txt
+bootstrap.log
+tfplan

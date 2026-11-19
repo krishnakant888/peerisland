@@ -1,0 +1,38 @@
+apiVersion: autoscaling.k8s.io/v1
+kind: VerticalPodAutoscaler
+metadata:
+  name: frontend
+  namespace: peerisland
+  labels:
+    app: frontend
+    component: autoscaling
+spec:
+  targetRef:
+    apiVersion: argoproj.io/v1alpha1
+    kind: Rollout
+    name: frontend
+
+  # Safe because HPA watches nginx_active_connections_per_pod (not CPU/memory).
+  updatePolicy:
+    updateMode: "Auto"
+
+  resourcePolicy:
+    containerPolicies:
+      - containerName: frontend
+        controlledValues: RequestsOnly
+
+        # ── Tiered resource stack (frontend) ─────────────────────────────
+        #
+        #   Deployment limit  →  cpu: 500m  /  memory: 256Mi   (hard ceiling)
+        #   VPA maxAllowed    →  cpu: 350m  /  memory: 192Mi   (VPA soft cap, ~30% below limit)
+        #   VPA target (est.) →  cpu: ~60m  /  memory: ~80Mi   (static file serving)
+        #   Deployment request →  cpu:  50m  /  memory:  64Mi   (starting point)
+        #   VPA minAllowed    →  cpu:  20m  /  memory:  32Mi   (floor)
+        #
+        minAllowed:
+          cpu:    "20m"
+          memory: "32Mi"
+
+        maxAllowed:
+          cpu:    "350m"    # < 500m limit — leaves 150m burst headroom
+          memory: "192Mi"   # < 256Mi limit — leaves 64Mi burst headroom

@@ -1,0 +1,98 @@
+# Mimir in monolithic mode — all components in one process
+# Scale to distributed mode later by changing `target`
+mimir:
+  structuredConfig:
+    target: all,alertmanager
+
+    common:
+      storage:
+        backend: filesystem
+
+    blocks_storage:
+      filesystem:
+        dir: /data/blocks
+
+    alertmanager_storage:
+      filesystem:
+        dir: /data/alertmanager
+
+    ruler_storage:
+      filesystem:
+        dir: /data/ruler
+
+    # Retention
+    compactor:
+      blocks_retention_period: 720h   # 30 days
+
+    # Limits
+    limits:
+      ingestion_rate: 10000
+      max_global_series_per_user: 1500000
+      max_exemplars_per_series_per_minute: 1000
+
+    # Alertmanager receivers — fill in secrets from Key Vault via SecretProviderClass
+    alertmanager:
+      external_url: "http://mimir.monitoring.svc.cluster.local:8080/alertmanager"
+    alertmanager_config:
+      route:
+        group_by: ["alertname", "namespace"]
+        group_wait: 30s
+        group_interval: 5m
+        repeat_interval: 4h
+        receiver: "null"
+        routes:
+          - matchers: ["severity=~\"warning|critical\""]
+            receiver: "platform-slack"
+      receivers:
+        - name: "null"
+        - name: "platform-slack"
+          slack_configs:
+            - api_url: "REPLACE_WITH_SLACK_WEBHOOK"
+              channel: "#platform-alerts"
+              title: "{{ .GroupLabels.alertname }}"
+              text: "{{ range .Alerts }}{{ .Annotations.description }}\n{{ end }}"
+
+    # Recording rules (pre-computed at ingest for fast dashboard queries)
+    ruler:
+      rule_path: /data/rules
+      alertmanager_url: "http://localhost:8080/alertmanager"
+
+minio:
+  enabled: false   # Using local filesystem for simplicity
+
+# Single binary — disables all distributed sub-charts
+distributor:
+  replicas: 0
+ingester:
+  replicas: 0
+querier:
+  replicas: 0
+query_frontend:
+  replicas: 0
+query_scheduler:
+  replicas: 0
+store_gateway:
+  replicas: 0
+compactor:
+  replicas: 0
+ruler:
+  replicas: 0
+alertmanager:
+  replicas: 0
+overrides_exporter:
+  replicas: 0
+
+# Monolithic deployment
+singleBinary:
+  replicas: 1
+  persistence:
+    enabled: true
+    size: 20Gi
+    storageClass: managed-premium
+  resources:
+    requests:
+      cpu: 500m
+      memory: 512Mi
+    limits:
+      cpu: 2000m
+      memory: 2Gi

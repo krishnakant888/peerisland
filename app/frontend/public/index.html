@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>PeerIsland – Task Manager</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: system-ui, -apple-system, sans-serif; background: #f0f4f8; color: #1a202c; min-height: 100vh; }
+    header { background: #2b6cb0; color: white; padding: 1rem 2rem; }
+    header h1 { font-size: 1.4rem; font-weight: 600; }
+    main { max-width: 700px; margin: 2rem auto; padding: 0 1rem; }
+    .card { background: white; border-radius: 10px; box-shadow: 0 1px 4px rgba(0,0,0,.1); padding: 1.5rem; margin-bottom: 1.5rem; }
+    .card h2 { margin-bottom: 1rem; font-size: 1.1rem; }
+    .form-row { display: flex; gap: .75rem; flex-wrap: wrap; }
+    input[type="text"] { flex: 1; min-width: 0; padding: .6rem .8rem; border: 1px solid #cbd5e0; border-radius: 6px; font-size: .95rem; }
+    button { padding: .6rem 1.2rem; border: none; border-radius: 6px; cursor: pointer; font-size: .9rem; }
+    .btn-add  { background: #2b6cb0; color: white; }
+    .btn-add:hover { background: #2c5282; }
+    .btn-done { background: #48bb78; color: white; }
+    .btn-del  { background: #e53e3e; color: white; }
+    ul { list-style: none; }
+    li { display: flex; align-items: center; gap: .75rem; padding: .75rem 0; border-bottom: 1px solid #e2e8f0; }
+    li:last-child { border-bottom: none; }
+    li.done .title { text-decoration: line-through; color: #a0aec0; }
+    .title { flex: 1; }
+    .desc  { font-size: .85rem; color: #718096; }
+    .empty { color: #a0aec0; font-style: italic; }
+  </style>
+</head>
+<body>
+  <header><h1>PeerIsland Task Manager</h1></header>
+  <main>
+    <div class="card">
+      <h2>Add Task</h2>
+      <div class="form-row">
+        <input type="text" id="taskTitle" placeholder="Task title…" />
+        <input type="text" id="taskDesc"  placeholder="Description (optional)" />
+        <button class="btn-add" onclick="createTask()">Add</button>
+      </div>
+    </div>
+    <div class="card">
+      <h2>Tasks</h2>
+      <ul id="taskList"><li class="empty">No tasks yet.</li></ul>
+    </div>
+  </main>
+
+  <script>
+    const API = '/api';
+
+    async function fetchTasks() {
+      const tasks = await fetch(`${API}/tasks`).then(r => r.json());
+      const list = document.getElementById('taskList');
+      if (!tasks.length) {
+        list.innerHTML = '<li class="empty">No tasks yet.</li>';
+        return;
+      }
+      list.innerHTML = tasks.map(t => `
+        <li class="${t.done ? 'done' : ''}">
+          <div class="title">
+            ${esc(t.title)}
+            ${t.description ? `<div class="desc">${esc(t.description)}</div>` : ''}
+          </div>
+          <button class="btn-done" onclick="toggleDone(${t.id},${!t.done})">${t.done ? 'Undo' : 'Done'}</button>
+          <button class="btn-del"  onclick="deleteTask(${t.id})">Delete</button>
+        </li>`).join('');
+    }
+
+    async function createTask() {
+      const title = document.getElementById('taskTitle').value.trim();
+      const description = document.getElementById('taskDesc').value.trim();
+      if (!title) return;
+      await fetch(`${API}/tasks`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title, description }),
+      });
+      document.getElementById('taskTitle').value = '';
+      document.getElementById('taskDesc').value = '';
+      fetchTasks();
+    }
+
+    async function toggleDone(id, done) {
+      await fetch(`${API}/tasks/${id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ done }),
+      });
+      fetchTasks();
+    }
+
+    async function deleteTask(id) {
+      await fetch(`${API}/tasks/${id}`, { method: 'DELETE' });
+      fetchTasks();
+    }
+
+    function esc(s) {
+      return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    }
+
+    fetchTasks();
+  </script>
+</body>
+</html>

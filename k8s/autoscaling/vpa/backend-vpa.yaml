@@ -1,0 +1,45 @@
+apiVersion: autoscaling.k8s.io/v1
+kind: VerticalPodAutoscaler
+metadata:
+  name: backend
+  namespace: peerisland
+  labels:
+    app: backend
+    component: autoscaling
+spec:
+  targetRef:
+    apiVersion: argoproj.io/v1alpha1
+    kind: Rollout
+    name: backend
+
+  # Safe because HPA watches http_requests_per_second (not CPU/memory).
+  # VPA adjusting requests cannot change that metric's value.
+  updatePolicy:
+    updateMode: "Auto"
+
+  resourcePolicy:
+    containerPolicies:
+      - containerName: backend
+
+        # RequestsOnly: VPA sets requests; limits stay fixed at Deployment values.
+        # This means a bad recommendation cannot cause an OOMKill — the limit
+        # remains the hard ceiling regardless of what VPA recommends.
+        controlledValues: RequestsOnly
+
+        # ── Tiered resource stack (backend) ──────────────────────────────
+        #
+        #   Deployment limit  →  cpu: 1000m  /  memory: 512Mi   (hard ceiling)
+        #   VPA maxAllowed    →  cpu:  800m  /  memory: 384Mi   (VPA soft cap, 20% below limit)
+        #   VPA target (est.) →  cpu: ~200m  /  memory: ~180Mi  (typical CRUD load)
+        #   Deployment request →  cpu:  100m  /  memory: 128Mi   (starting point)
+        #   VPA minAllowed    →  cpu:   50m  /  memory:  64Mi   (floor)
+        #
+        # 20% gap between maxAllowed and limit ensures the pod always has
+        # burst headroom above its request before hitting the hard limit.
+        minAllowed:
+          cpu:    "50m"
+          memory: "64Mi"
+
+        maxAllowed:
+          cpu:    "800m"    # < 1000m limit — leaves 200m burst headroom
+          memory: "384Mi"   # < 512Mi limit — leaves 128Mi burst headroom

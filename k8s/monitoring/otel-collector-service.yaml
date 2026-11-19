@@ -1,0 +1,22 @@
+# Stable ClusterIP DNS name for the Alloy OTLP receiver.
+# Backend pods send traces here — decoupled from Alloy's pod name/IP.
+apiVersion: v1
+kind: Service
+metadata:
+  name: alloy-otlp
+  namespace: monitoring
+  labels:
+    app: alloy-otlp
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: alloy   # matches Alloy DaemonSet pods
+  ports:
+    - name: otlp-grpc
+      port: 4317
+      targetPort: 4317
+      protocol: TCP
+    - name: otlp-http
+      port: 4318
+      targetPort: 4318
+      protocol: TCP

@@ -1,0 +1,57 @@
+groups:
+  - name: peerisland-backend
+    interval: 1m
+    rules:
+
+      - alert: BackendHighErrorRate
+        expr: |
+          sum(rate(http_requests_total{namespace="peerisland",status_code=~"5.."}[5m]))
+          /
+          sum(rate(http_requests_total{namespace="peerisland"}[5m])) > 0.05
+        for: 5m
+        labels:
+          severity: critical
+          team: platform
+        annotations:
+          summary: "Backend error rate above 5%"
+          description: "Error rate is {{ $value | humanizePercentage }} over the last 5 minutes."
+          runbook: "https://github.com/<YOUR_ORG>/peerisland/wiki/runbooks/backend-errors"
+
+      - alert: BackendHighP99Latency
+        expr: |
+          histogram_quantile(0.99,
+            sum by(le) (rate(http_request_duration_seconds_bucket{namespace="peerisland"}[5m]))
+          ) > 1
+        for: 10m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "Backend p99 latency above 1 second"
+          description: "p99 latency is {{ $value | humanizeDuration }} over the last 10 minutes."
+
+      - alert: BackendPodCrashLooping
+        expr: |
+          sum by(pod) (
+            increase(kube_pod_container_status_restarts_total{namespace="peerisland",container="backend"}[15m])
+          ) > 3
+        for: 0m
+        labels:
+          severity: critical
+          team: platform
+        annotations:
+          summary: "Backend pod {{ $labels.pod }} is crash-looping"
+          description: "Pod restarted {{ $value | humanize }} times in the last 15 minutes."
+
+      - alert: HPAAtMaxReplicas
+        expr: |
+          kube_horizontalpodautoscaler_status_current_replicas{namespace="peerisland",horizontalpodautoscaler="backend"}
+          ==
+          kube_horizontalpodautoscaler_spec_max_replicas{namespace="peerisland",horizontalpodautoscaler="backend"}
+        for: 10m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "Backend HPA at maximum replicas — possible capacity pressure"
+          description: "HPA has been at maxReplicas ({{ $value }}) for over 10 minutes."

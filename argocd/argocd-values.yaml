@@ -1,0 +1,39 @@
+global:
+  domain: argocd.peerisland.yourdomain.com
+
+server:
+  ingress:
+    enabled: true
+    ingressClassName: nginx
+    annotations:
+      nginx.ingress.kubernetes.io/ssl-redirect: "true"
+      nginx.ingress.kubernetes.io/backend-protocol: "HTTPS"
+    hosts:
+      - argocd.peerisland.yourdomain.com
+    tls:
+      - hosts:
+          - argocd.peerisland.yourdomain.com
+        secretName: argocd-tls
+
+configs:
+  params:
+    server.insecure: false
+  cm:
+    # Disable anonymous access
+    users.anonymous.enabled: "false"
+    # Webhook URL for GitHub to trigger sync
+    # Set up a GitHub webhook pointing to: https://argocd.peerisland.yourdomain.com/api/webhook
+    resource.customizations.ignoreDifferences.admissionregistration.k8s.io_MutatingWebhookConfiguration: |
+      jqPathExpressions:
+        - ".webhooks[]?.clientConfig.caBundle"
+
+  rbac:
+    policy.default: role:readonly
+    policy.csv: |
+      p, role:org-admin, applications, *, */*, allow
+      p, role:org-admin, clusters, get, *, allow
+      p, role:org-admin, repositories, *, *, allow
+      g, peerisland-admins, role:org-admin
+
+notifications:
+  enabled: true

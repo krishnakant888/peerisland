@@ -1,0 +1,13 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: frontend
+  namespace: peerisland
+  labels:
+    app: frontend
+    component: autoscaling
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: frontend

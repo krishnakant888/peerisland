@@ -1,0 +1,42 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: monitoring-prometheus-adapter
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"   # after mimir is running (wave 1); HPA needs this API
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+
+  sources:
+    - repoURL: https://prometheus-community.github.io/helm-charts
+      chart: prometheus-adapter
+      targetRevision: "4.10.0"
+      helm:
+        valueFiles:
+          - $values/monitoring/prometheus-adapter-values.yaml
+
+    - repoURL: https://github.com/<YOUR_ORG>/peerisland.git
+      targetRevision: HEAD
+      ref: values
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: monitoring
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+
+  # The adapter registers itself as an APIService — ArgoCD sees this as drift
+  # because the caBundle is injected post-deploy by cert injection
+  ignoreDifferences:
+    - group: apiregistration.k8s.io
+      kind: APIService
+      jsonPointers:
+        - /spec/caBundle

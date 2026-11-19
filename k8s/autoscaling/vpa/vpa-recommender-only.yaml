@@ -1,0 +1,32 @@
+# Use this during the initial rollout period to observe VPA recommendations
+# WITHOUT applying them. Switch backend/frontend VPA to updateMode: "Off"
+# and check recommendations with:
+#   kubectl describe vpa backend -n peerisland
+#
+# Once recommendations stabilize (3-7 days of real traffic), switch to
+# updateMode: "Initial" in backend-vpa.yaml and frontend-vpa.yaml.
+
+apiVersion: autoscaling.k8s.io/v1
+kind: VerticalPodAutoscaler
+metadata:
+  name: backend-recommender
+  namespace: peerisland
+  labels:
+    app: backend
+    vpa-mode: observe-only
+spec:
+  targetRef:
+    apiVersion: argoproj.io/v1alpha1
+    kind: Rollout
+    name: backend
+  updatePolicy:
+    updateMode: "Off"   # never touch pods — recommendations only
+  resourcePolicy:
+    containerPolicies:
+      - containerName: backend
+        minAllowed:
+          cpu:    "50m"
+          memory: "64Mi"
+        maxAllowed:
+          cpu:    "2000m"
+          memory: "1Gi"

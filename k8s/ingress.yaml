@@ -1,0 +1,56 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: peerisland-ingress
+  namespace: peerisland
+  annotations:
+    kubernetes.io/ingress.class: "nginx"
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/use-regex: "true"
+    nginx.ingress.kubernetes.io/proxy-body-size: "1m"
+    # Security headers
+    nginx.ingress.kubernetes.io/configuration-snippet: |
+      more_set_headers "X-Content-Type-Options: nosniff";
+      more_set_headers "X-Frame-Options: DENY";
+      more_set_headers "X-XSS-Protection: 1; mode=block";
+      more_set_headers "Referrer-Policy: strict-origin-when-cross-origin";
+spec:
+  tls:
+    - hosts:
+        - peerisland.yourdomain.com
+      secretName: peerisland-tls
+  rules:
+    - host: peerisland.yourdomain.com
+      http:
+        paths:
+          # ── active (blue) ─────────────────────────────────────────────────
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: backend-active
+                port:
+                  number: 80
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: frontend-active
+                port:
+                  number: 80
+          # ── preview (green) — only has pods during an active rollout ──────
+          # Returns 503 when no deployment is in progress (safe to leave open)
+          - path: /preview/api
+            pathType: Prefix
+            backend:
+              service:
+                name: backend-preview
+                port:
+                  number: 80
+          - path: /preview
+            pathType: Prefix
+            backend:
+              service:
+                name: frontend-preview
+                port:
+                  number: 80

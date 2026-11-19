@@ -1,0 +1,101 @@
+{
+  "title": "PeerIsland Infrastructure",
+  "uid": "peerisland-infra",
+  "schemaVersion": 38,
+  "version": 1,
+  "refresh": "2m",
+  "time": { "from": "now-3h", "to": "now" },
+  "tags": ["peerisland", "infrastructure", "k8s"],
+  "panels": [
+    {
+      "id": 1,
+      "title": "Node CPU Usage",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 0, "w": 12, "h": 8 },
+      "targets": [{
+        "datasource": { "type": "prometheus", "uid": "mimir" },
+        "expr": "1 - avg by(node) (rate(node_cpu_seconds_total{mode=\"idle\"}[5m]))",
+        "legendFormat": "{{node}}"
+      }],
+      "fieldConfig": { "defaults": { "unit": "percentunit", "max": 1, "min": 0, "thresholds": { "steps": [
+        { "color": "green", "value": null },
+        { "color": "yellow", "value": 0.7 },
+        { "color": "red", "value": 0.9 }
+      ]}}}
+    },
+    {
+      "id": 2,
+      "title": "Node Memory Usage",
+      "type": "timeseries",
+      "gridPos": { "x": 12, "y": 0, "w": 12, "h": 8 },
+      "targets": [{
+        "datasource": { "type": "prometheus", "uid": "mimir" },
+        "expr": "1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)",
+        "legendFormat": "{{instance}}"
+      }],
+      "fieldConfig": { "defaults": { "unit": "percentunit", "max": 1, "min": 0 }}
+    },
+    {
+      "id": 3,
+      "title": "Pod Restart Count (last 1h)",
+      "type": "table",
+      "gridPos": { "x": 0, "y": 8, "w": 12, "h": 8 },
+      "targets": [{
+        "datasource": { "type": "prometheus", "uid": "mimir" },
+        "expr": "topk(10, increase(kube_pod_container_status_restarts_total{namespace=\"peerisland\"}[1h]))",
+        "legendFormat": "{{pod}}/{{container}}",
+        "instant": true
+      }],
+      "options": { "sortBy": [{ "displayName": "Value", "desc": true }] },
+      "fieldConfig": { "defaults": { "unit": "short" }}
+    },
+    {
+      "id": 4,
+      "title": "HPA Replicas (backend)",
+      "type": "timeseries",
+      "gridPos": { "x": 12, "y": 8, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "mimir" },
+          "expr": "kube_horizontalpodautoscaler_status_current_replicas{namespace=\"peerisland\",horizontalpodautoscaler=\"backend\"}",
+          "legendFormat": "current"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "mimir" },
+          "expr": "kube_horizontalpodautoscaler_status_desired_replicas{namespace=\"peerisland\",horizontalpodautoscaler=\"backend\"}",
+          "legendFormat": "desired"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "mimir" },
+          "expr": "kube_horizontalpodautoscaler_spec_max_replicas{namespace=\"peerisland\",horizontalpodautoscaler=\"backend\"}",
+          "legendFormat": "max"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short", "min": 0 }}
+    },
+    {
+      "id": 5,
+      "title": "Container CPU Usage by Pod",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 16, "w": 12, "h": 8 },
+      "targets": [{
+        "datasource": { "type": "prometheus", "uid": "mimir" },
+        "expr": "sum by(pod, container) (rate(container_cpu_usage_seconds_total{namespace=\"peerisland\",container!=\"\"}[5m]))",
+        "legendFormat": "{{pod}}/{{container}}"
+      }],
+      "fieldConfig": { "defaults": { "unit": "cores" }}
+    },
+    {
+      "id": 6,
+      "title": "Container Memory Usage by Pod",
+      "type": "timeseries",
+      "gridPos": { "x": 12, "y": 16, "w": 12, "h": 8 },
+      "targets": [{
+        "datasource": { "type": "prometheus", "uid": "mimir" },
+        "expr": "sum by(pod, container) (container_memory_working_set_bytes{namespace=\"peerisland\",container!=\"\"})",
+        "legendFormat": "{{pod}}/{{container}}"
+      }],
+      "fieldConfig": { "defaults": { "unit": "bytes" }}
+    }
+  ]
+}
