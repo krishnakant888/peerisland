@@ -2158,6 +2158,72 @@ def _refresh_github_secrets(state: dict, org: str, repo_name: str):
         log("WARN", f"OIDC subject check failed: {exc}")
 
 
+def _print_access_summary(state: dict):
+    """Print ArgoCD, Grafana, and infra URLs with credentials. Called at Phase 9 end and Phase 11."""
+    # Resolve nginx LB IP — may have been stored under different keys across phases
+    nginx_ip = (
+        state["data"].get("appgw_ip")
+        or state["data"].get("nginx_ip")
+        or capture(
+            "kubectl get svc ingress-nginx-controller -n ingress-nginx "
+            "-o jsonpath='{.status.loadBalancer.ingress[0].ip}'",
+            check=False,
+        ).strip().strip("'")
+        or ""
+    )
+
+    # ArgoCD initial admin password — stored in state or fetched live from secret
+    argocd_pw = state["data"].get("argocd_password", "")
+    if not argocd_pw:
+        pw_b64 = capture(
+            "kubectl -n argocd get secret argocd-initial-admin-secret "
+            "-o jsonpath='{.data.password}'",
+            check=False,
+        ).strip().strip("'")
+        if pw_b64:
+            try:
+                import base64 as _b64
+                argocd_pw = _b64.b64decode(pw_b64).decode()
+                state["data"]["argocd_password"] = argocd_pw
+            except Exception:
+                argocd_pw = pw_b64
+
+    # Grafana admin password — from state or Key Vault
+    grafana_pw = state["data"].get("grafana_password") or state["data"].get("grafana_admin_password", "")
+    if not grafana_pw:
+        kv = state["data"].get("kv_name", "")
+        if kv:
+            r = subprocess.run(
+                f"az keyvault secret show --vault-name {kv} --name grafana-admin-password --query value -o tsv",
+                shell=True, capture_output=True, text=True, encoding="utf-8",
+            )
+            if r.returncode == 0:
+                grafana_pw = r.stdout.strip()
+                state["data"]["grafana_admin_password"] = grafana_pw
+
+    base = f"https://{nginx_ip}" if nginx_ip else "(nginx LB IP not yet assigned — run after Phase 7)"
+
+    sep = "─" * 58
+    def row(label, value=""):
+        return f"  {label:<26}  {value}" if value else f"  {label}"
+
+    print(f"\n  {green('ACCESS SUMMARY')}  {dim('(save these credentials)')}")
+    print(f"  {sep}")
+    print(row("ArgoCD",       base))
+    print(row("  username",   "admin"))
+    print(row("  password",   argocd_pw or "(kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d)"))
+    print(f"  {sep}")
+    print(row("Grafana",      f"{base}/grafana"))
+    print(row("  username",   "admin"))
+    print(row("  password",   grafana_pw or "(az keyvault secret show --vault-name <kv> --name grafana-admin-password --query value -o tsv)"))
+    print(f"  {sep}")
+    print(row("App",          base))
+    print(row("AKS cluster",  state["data"].get("aks_cluster_name", "")))
+    print(row("ACR",          state["data"].get("acr_login_server", "")))
+    print(row("Key Vault",    state["data"].get("kv_name", "")))
+    print(f"  {sep}\n")
+
+
 def phase9_first_build(state: dict):
     phase_header(9, "Trigger first build via GitHub Actions")
     org       = state["data"].get("github_org",  "")
@@ -2204,6 +2270,9 @@ def phase9_first_build(state: dict):
     print()
     log("OK", "Images built, tagged, pushed to ACR. kustomization.yaml SHA bumped.")
     mark_done(state, 9)
+
+    # Print access summary so the user can verify everything immediately
+    _print_access_summary(state)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
