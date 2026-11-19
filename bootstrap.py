@@ -1537,6 +1537,13 @@ def phase8_wait_argocd(state: dict):
     # (needed when this phase is re-run from a fresh shell that skipped Phase 5)
     _ensure_kubectl_auth(state)
 
+    # Apply resource limits + repo-server replicas=2 before the first heavy sync
+    # wave starts.  This prevents repo-server OOMKills (which cause the global
+    # rpc error) on clusters bootstrapped before these values were added.
+    # helm upgrade is a no-op when values haven't changed, so this is safe to
+    # call every time Phase 8 runs.
+    _ensure_argocd_resources_patched()
+
     # Print access credentials so the user can log in while sync is in progress
     argocd_pw    = state["data"].get("argocd_password", "")
     grafana_pw   = state["data"].get("grafana_admin_password", "")
