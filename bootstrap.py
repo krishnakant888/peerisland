@@ -1533,6 +1533,10 @@ def _ensure_user_nodes(state: dict):
 def phase8_wait_argocd(state: dict):
     phase_header(8, "Wait for ArgoCD sync waves to complete")
 
+    # Ensure kubelogin is installed and kubectl is authenticated
+    # (needed when this phase is re-run from a fresh shell that skipped Phase 5)
+    _ensure_kubectl_auth(state)
+
     # Print access credentials so the user can log in while sync is in progress
     argocd_pw    = state["data"].get("argocd_password", "")
     grafana_pw   = state["data"].get("grafana_admin_password", "")
@@ -1678,27 +1682,138 @@ def phase8_wait_argocd(state: dict):
         log("OK", "application-controller restarted — waiting 20s for reconnect …")
         time.sleep(20)
 
-    def _force_sync_stuck(status: dict):
-        """Force-refresh and sync apps that are Unknown or OutOfSync."""
-        # If most apps have rpc errors, the issue is a component, not individual apps
+    _kustomize_fix_done = [False]  # mutable flag visible to nested functions
+
+    def _diagnose_and_fix_unhealthy(status: dict):
+        """
+        Inspect every unhealthy app's conditions and apply targeted fixes.
+        Called periodically during the wait loop so each issue is fixed once.
+        """
         if _has_global_rpc_error(status):
             _fix_global_rpc(status)
             return
+
         for name in expected:
             s      = status.get(name, {})
             sync   = s.get("sync",   {}).get("status", "Unknown")
             health = s.get("health", {}).get("status", "Unknown")
-            if sync in ("Unknown", "OutOfSync") and health != "Missing":
-                log("WARN", f"Force-syncing stuck app: {name} ({sync}/{health})")
+            if sync == "Synced" and health in ("Healthy", "Progressing"):
+                continue  # already fine
+
+            # Collect every condition/health message for pattern matching
+            cond_msgs = [c.get("message", "") for c in s.get("conditions", [])]
+            health_msg = s.get("health", {}).get("message", "")
+            all_text   = " ".join(cond_msgs + [health_msg]).lower()
+
+            log("INFO", f"  Diagnosing {name}  sync={sync}  health={health}")
+            if cond_msgs:
+                for m in cond_msgs[:2]:
+                    if m:
+                        log("INFO", f"    condition: {m[:120]}")
+            if health_msg:
+                log("INFO", f"    health:    {health_msg[:120]}")
+
+            # ── Fix 1: kustomize path / load-restrictor ───────────────────
+            if (not _kustomize_fix_done[0] and (
+                "load-restrictor" in all_text
+                or ("kustomize" in all_text and ("not permitted" in all_text
+                                                 or "outside" in all_text
+                                                 or "failed to" in all_text))
+            )):
+                log("WARN", f"  {name}: kustomize path error — re-patching argocd-cm …")
                 subprocess.run(
-                    f"kubectl annotate application {name} -n argocd "
-                    f"argocd.argoproj.io/refresh=normal --overwrite",
+                    "kubectl patch configmap argocd-cm -n argocd --type=merge "
+                    '--patch \'{"data":{"kustomize.buildOptions":'
+                    '"--load-restrictor LoadRestrictionsNone"}}\'',
                     shell=True, capture_output=True,
                 )
+                subprocess.run("kubectl rollout restart deployment argocd-repo-server -n argocd",
+                                shell=True, capture_output=True)
+                subprocess.run("kubectl rollout status deployment argocd-repo-server -n argocd --timeout=120s",
+                                shell=True)
+                subprocess.run("kubectl rollout restart statefulset argocd-application-controller -n argocd",
+                                shell=True, capture_output=True)
+                subprocess.run("kubectl rollout status statefulset argocd-application-controller -n argocd --timeout=180s",
+                                shell=True)
+                subprocess.run("kubectl annotate applications -n argocd --all "
+                                "argocd.argoproj.io/refresh=hard --overwrite",
+                                shell=True, capture_output=True)
+                _kustomize_fix_done[0] = True
+                log("OK", "  argocd-cm patched — repo-server + app-controller restarted")
+                time.sleep(20)
+                return  # let the status refresh before fixing more
+
+            # ── Fix 2: rpc error on individual app (not global) ───────────
+            elif "rpc" in all_text or "failed to generate manifest" in all_text:
+                log("WARN", f"  {name}: rpc/manifest error — hard-refreshing …")
+                subprocess.run(
+                    f"kubectl annotate application {name} -n argocd "
+                    f"argocd.argoproj.io/refresh=hard --overwrite",
+                    shell=True, capture_output=True,
+                )
+
+            # ── Fix 3: image pull failure — images not in ACR yet ─────────
+            elif "imagepullbackoff" in all_text or "errimagepull" in all_text or "not found" in all_text:
+                log("WARN", f"  {name}: ImagePull error — images may not be in ACR yet (waiting for build)")
+
+            # ── Fix 4: OutOfSync — trigger a sync ─────────────────────────
+            elif sync == "OutOfSync":
+                log("WARN", f"  {name}: OutOfSync — triggering sync …")
                 subprocess.run(
                     f"argocd app sync {name} --force --async",
                     shell=True, capture_output=True,
                 )
+                subprocess.run(
+                    f"kubectl annotate application {name} -n argocd "
+                    f"argocd.argoproj.io/refresh=hard --overwrite",
+                    shell=True, capture_output=True,
+                )
+
+            # ── Fix 5: Unknown sync — hard refresh ────────────────────────
+            elif sync == "Unknown":
+                log("WARN", f"  {name}: Unknown sync — hard-refreshing …")
+                subprocess.run(
+                    f"kubectl annotate application {name} -n argocd "
+                    f"argocd.argoproj.io/refresh=hard --overwrite",
+                    shell=True, capture_output=True,
+                )
+
+            # ── Fix 6: Degraded — log pod errors for visibility ───────────
+            elif health == "Degraded":
+                # Map app → namespace for pod inspection
+                ns_map = {
+                    "monitoring-grafana":            "monitoring",
+                    "monitoring-loki":               "monitoring",
+                    "monitoring-mimir":              "monitoring",
+                    "monitoring-tempo":              "monitoring",
+                    "monitoring-alloy":              "monitoring",
+                    "monitoring-alloy-config":       "monitoring",
+                    "monitoring-prometheus-adapter": "monitoring",
+                    "peerisland-app":                "peerisland",
+                    "ingress-nginx":                 "ingress-nginx",
+                    "cert-manager":                  "cert-manager",
+                    "cert-manager-config":           "cert-manager",
+                    "argo-rollouts":                 "argo-rollouts",
+                    "ingresses":                     "peerisland",
+                }
+                ns = ns_map.get(name, "")
+                if ns:
+                    pods_r = subprocess.run(
+                        f"kubectl get pods -n {ns} --no-headers "
+                        f"-o custom-columns="
+                        f"NAME:.metadata.name,"
+                        f"STATUS:.status.phase,"
+                        f"READY:.status.containerStatuses[0].ready,"
+                        f"REASON:.status.containerStatuses[0].state.waiting.reason",
+                        shell=True, capture_output=True, text=True,
+                    )
+                    for pod_line in (pods_r.stdout or "").strip().splitlines()[:5]:
+                        if pod_line.strip():
+                            log("INFO", f"    pod: {pod_line.strip()[:100]}")
+
+    def _force_sync_stuck(status: dict):
+        """Force-refresh and sync apps that are Unknown or OutOfSync."""
+        _diagnose_and_fix_unhealthy(status)
 
     def all_healthy():
         status = _argocd_app_status()
@@ -2575,6 +2690,51 @@ def list_phases():
     print()
 
 
+def _ensure_kubectl_auth(state: dict):
+    """
+    Ensure kubelogin is installed and kubectl is authenticated against AKS.
+
+    Called at Phase 8 start (and from --diagnose mode) so every kubectl call
+    in the phase works even when the session was opened in a fresh shell that
+    never ran Phase 5.
+    """
+    _ensure_tools_on_path()
+
+    # Install kubelogin if it's missing from the tools dir
+    kl_exe = "kubelogin.exe" if _IS_WIN else "kubelogin"
+    if not any(
+        (Path(p) / kl_exe).exists()
+        for p in os.environ.get("PATH", "").split(os.pathsep)
+    ):
+        log("INFO", "kubelogin not found — installing …")
+        _ensure_tool("kubelogin")
+        _ensure_tools_on_path()
+    else:
+        log("OK", "kubelogin found in PATH")
+
+    # Refresh kubeconfig from AKS
+    rg      = state["data"].get("resource_group", "peerisland-prod-rg")
+    cluster = state["data"].get("aks_cluster_name", "peerisland-prod-aks")
+    r = subprocess.run(
+        f"az aks get-credentials -g {rg} -n {cluster} --overwrite-existing",
+        shell=True, capture_output=True, text=True,
+    )
+    if r.returncode != 0:
+        log("WARN", f"az aks get-credentials failed: {(r.stderr or r.stdout)[:200]}")
+    else:
+        log("OK", "kubeconfig refreshed from AKS")
+
+    # Convert kubeconfig for AAD workload-identity / kubelogin
+    r2 = subprocess.run(
+        "kubelogin convert-kubeconfig -l azurecli",
+        shell=True, capture_output=True, text=True,
+    )
+    if r2.returncode != 0:
+        log("WARN", f"kubelogin convert-kubeconfig failed: {(r2.stderr or r2.stdout)[:200]}")
+    else:
+        log("OK", "kubelogin auth conversion done")
+
+
 def _ensure_tools_on_path():
     """Inject all known tool directories into PATH for the current process.
 
@@ -2634,12 +2794,73 @@ def main():
                         help="Print commands without executing them")
     parser.add_argument("--reset",   dest="reset",      action="store_true",
                         help="Clear saved state and start over from phase 1")
-    parser.add_argument("--list",    dest="list_phases", action="store_true",
+    parser.add_argument("--list",     dest="list_phases", action="store_true",
                         help="List all phases and exit")
+    parser.add_argument("--diagnose", dest="diagnose",    action="store_true",
+                        help="Install kubelogin, refresh kubeconfig, show ArgoCD status + auto-fix unhealthy apps")
     args = parser.parse_args()
 
     if args.list_phases:
         list_phases()
+        return
+
+    if args.diagnose:
+        state = load_state()
+        _ensure_tools_on_path()
+        _ensure_kubectl_auth(state)
+        # Build app status table and diagnose
+        r = subprocess.run(
+            "kubectl get applications -n argocd -o json",
+            shell=True, capture_output=True, text=True,
+        )
+        if r.returncode != 0:
+            die(f"kubectl get applications failed: {r.stderr}")
+        items = json.loads(r.stdout).get("items", [])
+        status = {a["metadata"]["name"]: a.get("status", {}) for a in items}
+        print(f"\n  {bold('ArgoCD Apps')}  ({len(status)} found)")
+        sep = "─" * 70
+        print(f"  {dim(sep)}")
+        for name, s in sorted(status.items()):
+            sync   = s.get("sync",   {}).get("status", "Unknown")
+            health = s.get("health", {}).get("status", "Unknown")
+            ok     = sync == "Synced" and health in ("Healthy", "Progressing")
+            icon   = green("✓") if ok else red("✗")
+            cond_msgs = [c.get("message", "") for c in s.get("conditions", [])]
+            hmsg   = s.get("health", {}).get("message", "")
+            errs   = [m for m in (cond_msgs + [hmsg]) if m]
+            print(f"  {icon}  {name:<42}  {dim(sync + '/' + health)}")
+            for e in errs[:2]:
+                print(f"       {yellow(e[:100])}")
+        print(f"  {dim(sep)}\n")
+
+        # Apply fixes for all unhealthy apps
+        expected_all = [a["metadata"]["name"] for a in items]
+        # Temporarily patch expected list for _diagnose_and_fix_unhealthy
+        # (it's defined inside phase8 so we call directly here)
+        log("INFO", "Running auto-fix pass …")
+        # Quick inline fix pass
+        for name, s in status.items():
+            sync   = s.get("sync",   {}).get("status", "Unknown")
+            health = s.get("health", {}).get("status", "Unknown")
+            if sync == "Synced" and health in ("Healthy", "Progressing"):
+                continue
+            cond_msgs = [c.get("message", "") for c in s.get("conditions", [])]
+            hmsg      = s.get("health", {}).get("message", "")
+            all_text  = " ".join(cond_msgs + [hmsg]).lower()
+            if "rpc" in all_text or "failed to generate manifest" in all_text:
+                log("WARN", f"  {name}: rpc error — hard-refreshing")
+                subprocess.run(f"kubectl annotate application {name} -n argocd argocd.argoproj.io/refresh=hard --overwrite",
+                               shell=True, capture_output=True)
+            elif sync == "OutOfSync":
+                log("WARN", f"  {name}: OutOfSync — syncing")
+                subprocess.run(f"argocd app sync {name} --force --async", shell=True, capture_output=True)
+            elif "imagepullbackoff" in all_text or "errimagepull" in all_text:
+                log("WARN", f"  {name}: ImagePull error — images not in ACR yet")
+            elif sync == "Unknown" or health == "Unknown":
+                log("WARN", f"  {name}: Unknown — hard-refreshing")
+                subprocess.run(f"kubectl annotate application {name} -n argocd argocd.argoproj.io/refresh=hard --overwrite",
+                               shell=True, capture_output=True)
+        log("OK", "Diagnose pass done — re-run --diagnose in 30s to see updated status")
         return
 
     DRY_RUN = args.dry_run
