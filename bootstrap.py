@@ -1813,9 +1813,14 @@ def phase8_wait_argocd(state: dict):
 # ═════════════════════════════════════════════════════════════════════════════
 
 def _oidc_tf_apply():
-    """Targeted terraform apply to recreate the OIDC federated credential (and app if needed)."""
+    """Run terraform apply scoped to the OIDC resources then ensure the SP exists.
+
+    Targets only the three OIDC resources so it's fast and doesn't touch AKS/ACR/VNet.
+    After apply, verifies the service principal was created (Azure AD replication can lag)
+    and creates it via `az ad sp create` if Terraform silently skipped it.
+    """
     tf_dir = REPO_ROOT / "terraform"
-    log("INFO", "  Running: terraform apply -target=...github_main -auto-approve")
+    log("INFO", "  Running terraform apply on OIDC resources …")
     rc, out = _tf_stream(
         "terraform apply "
         "-target=azuread_application.cicd "
@@ -1825,9 +1830,39 @@ def _oidc_tf_apply():
         str(tf_dir),
     )
     if rc != 0:
-        log("WARN", f"  terraform apply failed (exit {rc}): {out[-300:]}")
+        log("WARN", f"  terraform apply failed (exit {rc})")
+        log("WARN", f"  last output: {out[-400:]}")
     else:
         log("OK", "  terraform apply succeeded")
+
+    # Verify the service principal was actually created.
+    # Terraform can silently skip SP creation when the app was just created
+    # (Azure AD replication lag) — detect and create it here.
+    client_id, _ = _tf_cicd_app_ids()
+    if not client_id:
+        log("WARN", "  No client_id after apply — cannot verify SP")
+        return
+
+    log("INFO", f"  Checking SP for app {client_id[:8]}… …")
+    sp_check = subprocess.run(
+        f"az ad sp show --id {client_id} --query appId -o tsv",
+        shell=True, capture_output=True, text=True,
+    )
+    if sp_check.returncode == 0 and sp_check.stdout.strip():
+        log("OK", f"  Service principal exists for {client_id[:8]}…")
+        return
+
+    log("WARN", f"  SP missing for {client_id[:8]}… — creating via az ad sp create …")
+    sp_create = subprocess.run(
+        f"az ad sp create --id {client_id}",
+        shell=True, capture_output=True, text=True,
+    )
+    if sp_create.returncode == 0:
+        log("OK", "  Service principal created")
+        log("INFO", "  Waiting 30s for Azure AD SP propagation …")
+        time.sleep(30)
+    else:
+        log("WARN", f"  az ad sp create failed: {(sp_create.stderr or sp_create.stdout)[:200]}")
 
 
 def _refresh_github_secrets(state: dict, org: str, repo_name: str):
@@ -1967,12 +2002,20 @@ def _refresh_github_secrets(state: dict, org: str, repo_name: str):
                     f"terraform state rm {res}",
                     shell=True, cwd=str(tf_dir), capture_output=True,
                 )
-            _oidc_tf_apply()
-            _, app_obj_id = _tf_cicd_app_ids()
+            _oidc_tf_apply()  # also creates SP if missing (see helper)
+            new_client_id, app_obj_id = _tf_cicd_app_ids()
             if not app_obj_id:
                 log("WARN", "Could not recover app after state cleanup — giving up")
                 return
             log("OK", f"  App recreated, new object ID: {app_obj_id}")
+            # Update AZURE_CLIENT_ID secret with the new client_id
+            if new_client_id and new_client_id != client_id:
+                log("INFO", f"  New client_id={new_client_id[:8]}… — refreshing AZURE_CLIENT_ID secret")
+                subprocess.run(
+                    f'gh secret set AZURE_CLIENT_ID --repo {org}/{repo_name} --body "{new_client_id}"',
+                    shell=True, capture_output=True,
+                )
+                client_id = new_client_id
 
         # List credentials on the (now-verified) app
         creds_raw = capture(
