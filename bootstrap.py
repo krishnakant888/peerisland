@@ -2748,54 +2748,45 @@ def _rollout_status_summary(svc: str) -> dict:
 def phase10_rollouts(state: dict):
     phase_header(10, "Watch & promote Rollouts (first deploy)")
     _require_tool("kubectl-argo-rollouts")
-    _start_argocd_widget()  # idempotent — already running from phase 9
-    _argocd_global_rpc_check_and_fix()  # ensure controller is healthy before watching rollouts
+    _ensure_kubectl_auth(state)          # re-auth if session expired since Phase 8
+    _start_argocd_widget()               # idempotent — already running from phase 9
+    _argocd_global_rpc_check_and_fix()   # ensure controller is healthy before watching rollouts
 
-    # ── Wait for each Rollout to pause, then promote ──────────────────────────
-    for svc in ("backend", "frontend"):
-        log("INFO", f"Watching {svc} Rollout — waiting for it to reach Paused …")
+    def _watch_rollout(svc: str, target_phase: str, timeout: int) -> dict:
+        """Poll rollout until target_phase, logging every change AND every 30s."""
+        log("INFO", f"Watching {svc} Rollout — waiting for phase={target_phase} …")
         last_phase = ""
-        deadline = time.time() + 300
+        last_log_t = time.time()
+        deadline = time.time() + timeout
         while time.time() < deadline:
             info = _rollout_status_summary(svc)
             ph = info["phase"]
-            if ph != last_phase:
-                log("INFO", f"  {svc}: phase={ph}  desired={info['desired']}  ready={info['ready']}  available={info['available']}"
-                    + (f"  ({info['message']})" if info["message"] else ""))
+            msg = f"  {svc}: phase={ph}  desired={info['desired']}  ready={info['ready']}  available={info['available']}" \
+                  + (f"  ({info['message']})" if info["message"] else "")
+            now = time.time()
+            if ph != last_phase or (now - last_log_t) >= 30:
+                log("INFO", msg)
                 last_phase = ph
-            if ph == "Paused":
-                log("OK", f"  {svc} Rollout is Paused — green ReplicaSet is ready")
-                break
+                last_log_t = now
+            if ph == target_phase:
+                log("OK", f"  {svc} Rollout reached {target_phase}")
+                return info
             if ph in ("Degraded", "Error"):
                 log("WARN", f"  {svc} Rollout entered {ph} — {info['message']}")
-                # still keep waiting; it may recover
             time.sleep(10)
-        else:
-            info = _rollout_status_summary(svc)
-            die(f"{svc} Rollout did not reach Paused within 300s. Last phase={info['phase']} message={info['message']!r}")
+        info = _rollout_status_summary(svc)
+        die(f"{svc} Rollout did not reach {target_phase} within {timeout}s. "
+            f"Last phase={info['phase']} message={info['message']!r}")
 
+    # ── Wait for each Rollout to pause, then promote ──────────────────────────
+    for svc in ("backend", "frontend"):
+        _watch_rollout(svc, "Paused", timeout=300)
         log("OK", f"{svc}: promoting (first deploy — no manual traffic gate needed)")
         run(f"kubectl argo rollouts promote {svc} -n peerisland")
 
     # ── Confirm both reach Healthy ────────────────────────────────────────────
     for svc in ("backend", "frontend"):
-        log("INFO", f"Waiting for {svc} Rollout to reach Healthy after promotion …")
-        last_phase = ""
-        deadline = time.time() + 300
-        while time.time() < deadline:
-            info = _rollout_status_summary(svc)
-            ph = info["phase"]
-            if ph != last_phase:
-                log("INFO", f"  {svc}: phase={ph}  desired={info['desired']}  ready={info['ready']}  available={info['available']}"
-                    + (f"  ({info['message']})" if info["message"] else ""))
-                last_phase = ph
-            if ph == "Healthy":
-                log("OK", f"  {svc} Rollout is Healthy")
-                break
-            time.sleep(10)
-        else:
-            info = _rollout_status_summary(svc)
-            die(f"{svc} Rollout did not reach Healthy within 300s after promotion. Last phase={info['phase']}")
+        _watch_rollout(svc, "Healthy", timeout=300)
 
     log("OK", "Both Rollouts promoted and Healthy")
     mark_done(state, 10)
