@@ -94,6 +94,28 @@ module "privateendpoints" {
   depends_on = [module.networking, module.acr, module.keyvault]
 }
 
+# ── ArgoCD ───────────────────────────────────────────────────────────────────
+# Manages the ArgoCD Helm release so terraform apply keeps argocd-cm in sync.
+# First-time import of the bootstrap-installed release:
+#   terraform import helm_release.argocd argocd/argocd
+resource "helm_release" "argocd" {
+  name             = "argocd"
+  repository       = "https://argoproj.github.io/argo-helm"
+  chart            = "argo-cd"
+  namespace        = "argocd"
+  create_namespace = true
+
+  values = [file("${path.root}/../argocd/argocd-values.yaml")]
+
+  # Allow ArgoCD to manage its own resources without Terraform fighting it.
+  skip_crds        = false
+  lint             = false
+  atomic           = false
+  wait             = false
+
+  depends_on = [module.aks]
+}
+
 # ── AKS Admin Group ───────────────────────────────────────────────────────────
 # Creates the AAD group and adds the deploying user as the first member.
 # Anyone added to this group later gets cluster-admin without a Terraform change.
