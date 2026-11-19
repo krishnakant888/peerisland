@@ -25,6 +25,11 @@ spec:
       name: mimir
       jsonPointers:
         - /spec/template/metadata/annotations/kubectl.kubernetes.io~1restartedAt
+        - /spec/persistentVolumeClaimRetentionPolicy
+        - /spec/podManagementPolicy
+        - /spec/revisionHistoryLimit
+        - /spec/updateStrategy
+        - /spec/volumeClaimTemplates/0/spec/volumeMode
 
   syncPolicy:
     automated:
