@@ -363,7 +363,7 @@ otelcol.processor.transform "cluster" {
   error_mode = "ignore"
   trace_statements {
     context    = "resource"
-    statements = [string.join(["set(attributes[\"k8s.cluster.name\"], \"", sys.env("CLUSTER"), "\")"], "")]
+    statements = ["set(attributes[\"k8s.cluster.name\"], \"" + sys.env("CLUSTER") + "\")"]
   }
   output {
     traces = [otelcol.processor.batch.default.input]
