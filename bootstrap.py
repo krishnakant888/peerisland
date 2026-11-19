@@ -1611,8 +1611,43 @@ def phase8_wait_argocd(state: dict):
             return {}
         return {a["metadata"]["name"]: a.get("status", {}) for a in items}
 
+    def _has_global_rpc_error(status: dict) -> bool:
+        """Return True if most apps share the same rpc error — signals a component issue."""
+        rpc_count = 0
+        for name in expected:
+            s = status.get(name, {})
+            for cond in s.get("conditions", []):
+                msg = cond.get("message", "")
+                if "rpc" in msg.lower() or "failed to generate manifest" in msg.lower():
+                    rpc_count += 1
+                    break
+        return rpc_count >= max(3, len(expected) // 2)
+
+    def _fix_global_rpc(status: dict):
+        """Restart app-controller + hard-refresh all apps to clear stale gRPC connections."""
+        log("WARN", "Global rpc error detected — restarting application-controller …")
+        subprocess.run(
+            "kubectl rollout restart statefulset argocd-application-controller -n argocd",
+            shell=True, capture_output=True,
+        )
+        subprocess.run(
+            "kubectl rollout status statefulset argocd-application-controller -n argocd --timeout=180s",
+            shell=True,
+        )
+        subprocess.run(
+            "kubectl annotate applications -n argocd --all "
+            "argocd.argoproj.io/refresh=hard --overwrite",
+            shell=True, capture_output=True,
+        )
+        log("OK", "application-controller restarted — waiting 20s for reconnect …")
+        time.sleep(20)
+
     def _force_sync_stuck(status: dict):
         """Force-refresh and sync apps that are Unknown or OutOfSync."""
+        # If most apps have rpc errors, the issue is a component, not individual apps
+        if _has_global_rpc_error(status):
+            _fix_global_rpc(status)
+            return
         for name in expected:
             s      = status.get(name, {})
             sync   = s.get("sync",   {}).get("status", "Unknown")
@@ -1680,13 +1715,13 @@ def phase8_wait_argocd(state: dict):
         print(f"  {dim(f'  … {remaining}s left')}", end="\r", flush=True)
         time.sleep(interval)
     else:
-        # Timeout — force-sync stuck apps and wait a final 5 min
+        # Timeout — force-sync stuck apps and wait a final 10 min
         print()
-        log("WARN", "Timeout — force-syncing stuck apps and retrying for 5 more minutes …")
+        log("WARN", "Timeout — force-syncing stuck apps and retrying for 10 more minutes …")
         status = _argocd_app_status()
         _force_sync_stuck(status)
         time.sleep(10)
-        deadline2 = time.time() + 300
+        deadline2 = time.time() + 600
         while time.time() < deadline2:
             if all_healthy():
                 log("OK", "All ArgoCD apps Synced/Healthy (after force-sync)")
