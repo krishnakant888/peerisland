@@ -202,6 +202,48 @@ def _lookup_role_assignment_id(guid_no_dashes: str) -> str:
     return r.stdout.strip() if r.returncode == 0 else ""
 
 
+def _lookup_federated_credential_import_id(diag_addr: str, cwd: Path) -> str:
+    """Return the Terraform import ID for a federated identity credential that
+    already exists in Azure AD but is missing from state.
+
+    Import ID format: /applications/{objectId}/federatedIdentityCredentials/{credId}
+    diag_addr example: azuread_application_federated_identity_credential.github_main
+    """
+    _, app_obj_id = _tf_cicd_app_ids()
+    if not app_obj_id:
+        # Fall back to parsing state show directly
+        st = subprocess.run(
+            "terraform state show azuread_application.cicd",
+            shell=True, capture_output=True, text=True, cwd=str(cwd),
+            env=os.environ.copy(),
+        )
+        for line in st.stdout.splitlines():
+            m = re.match(r'\s+id\s+=\s+"([^"]+)"', line)
+            if m:
+                app_obj_id = m.group(1)
+                break
+    if not app_obj_id:
+        log("WARN", "  _lookup_federated_credential_import_id: app object ID not found")
+        return ""
+
+    creds_raw = subprocess.run(
+        f"az ad app federated-credential list --id {app_obj_id} -o json",
+        shell=True, capture_output=True, text=True, env=os.environ.copy(),
+    )
+    if creds_raw.returncode != 0 or not creds_raw.stdout.strip():
+        log("WARN", f"  Could not list federated credentials for app {app_obj_id[:8]}…")
+        return ""
+
+    # Derive the display name: "github_main" → "github-main"
+    local_name = diag_addr.split(".")[-1].replace("_", "-")
+    for cred in json.loads(creds_raw.stdout or "[]"):
+        if cred.get("name") == local_name:
+            return f"/applications/{app_obj_id}/federatedIdentityCredentials/{cred['id']}"
+
+    log("WARN", f"  No federated credential named '{local_name}' found in Azure AD")
+    return ""
+
+
 
 
 def tf_apply(plan_file: str, cwd: Path) -> list[tuple[str, str]]:
@@ -303,6 +345,12 @@ def tf_apply(plan_file: str, cwd: Path) -> list[tuple[str, str]]:
                             if full_id:
                                 already_exists.append((diag_addr, full_id))
                                 log("WARN", f"  will auto-import {diag_addr}")
+                    # Case 3: azuread federated identity credential 409 — look up via az CLI
+                    elif re.search(r'FederatedIdentityCredential', detail) and re.search(r'already exists', detail, re.IGNORECASE):
+                        full_id = _lookup_federated_credential_import_id(diag_addr, cwd)
+                        if full_id:
+                            already_exists.append((diag_addr, full_id))
+                            log("WARN", f"  will auto-import {diag_addr}")
             elif level == "warning":
                 print(f"  {yellow(detail[:200])}")
 
@@ -1049,6 +1097,36 @@ def phase4_terraform(state: dict):
 
     run("terraform init -upgrade", cwd=tf_dir)
     run("terraform validate",      cwd=tf_dir)
+
+    # ── Pre-flight imports ────────────────────────────────────────────────────
+    # Adopt resources that exist in Azure/Helm but are not yet in Terraform state.
+    # This prevents 409 Conflict errors during apply.
+
+    def _in_state(addr: str) -> bool:
+        r = subprocess.run(f'terraform state show "{addr}"',
+                           shell=True, capture_output=True, cwd=str(tf_dir),
+                           env=os.environ.copy())
+        return r.returncode == 0
+
+    # ArgoCD Helm release (installed by bootstrap phase 7, now managed by Terraform)
+    if not _in_state("helm_release.argocd"):
+        helm_check = subprocess.run(
+            "helm status argocd -n argocd -o json",
+            shell=True, capture_output=True, text=True, env=os.environ.copy(),
+        )
+        if helm_check.returncode == 0:
+            log("INFO", "Importing existing ArgoCD Helm release into Terraform state …")
+            run('terraform import helm_release.argocd "argocd/argocd"', cwd=tf_dir, check=False)
+
+    # Federated identity credential (may exist from a previous non-Terraform apply)
+    if not _in_state("azuread_application_federated_identity_credential.github_main"):
+        import_id = _lookup_federated_credential_import_id(
+            "azuread_application_federated_identity_credential.github_main", tf_dir
+        )
+        if import_id:
+            log("INFO", "Importing existing federated identity credential into Terraform state …")
+            run(f'terraform import "azuread_application_federated_identity_credential.github_main" "{import_id}"',
+                cwd=tf_dir, check=False)
 
     MAX_ATTEMPTS = 5
     for attempt in range(1, MAX_ATTEMPTS + 1):
