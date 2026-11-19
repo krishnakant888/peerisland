@@ -1156,6 +1156,13 @@ def phase7_argocd(state: dict):
         argocd_pw = base64.b64decode(pw_b64 + "==").decode().strip()
         state["data"]["argocd_password"] = argocd_pw
         log("OK", "ArgoCD initial admin password retrieved")
+        sep = "─" * 56
+        print(f"\n  {green('ArgoCD is ready')}")
+        print(f"  {sep}")
+        print(f"  URL       https://<nginx-lb-ip>  (IP available after Phase 8)")
+        print(f"  Username  admin")
+        print(f"  Password  {argocd_pw}")
+        print(f"  {sep}\n")
 
     # Register GitHub repo credential with ArgoCD using the PAT from Key Vault
     kv = state["data"].get("kv_name", "")
