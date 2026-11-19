@@ -244,6 +244,134 @@ def _lookup_federated_credential_import_id(diag_addr: str, cwd: Path) -> str:
     return ""
 
 
+def _parse_rotation_required_fields(detail: str) -> list[str]:
+    """Extract node-pool field paths from a 'temporary_name_for_rotation must be specified' error.
+
+    Input  (from Terraform diagnostic detail):
+      '... ["default_node_pool.0.name" "default_node_pool.0.host_encryption_enabled" ...]'
+    Output:
+      ["default_node_pool[0].name", "default_node_pool[0].host_encryption_enabled"]
+    """
+    m = re.search(r'\[("default_node_pool[^]]+)\]', detail)
+    if not m:
+        return []
+    fields = re.findall(r'"([^"]+)"', m.group(0))
+    result = []
+    for f in fields:
+        f = re.sub(r'\.(\d+)\.', r'[\1].', f)
+        f = re.sub(r'\.(\d+)$',  r'[\1]',  f)
+        result.append(f)
+    return result
+
+
+def _auto_patch_aks_lifecycle(fields: list[str], tf_dir: Path) -> bool:
+    """Append missing node-pool fields to lifecycle.ignore_changes in modules/aks/main.tf.
+
+    Returns True if the file was modified (a re-plan is required after this).
+    """
+    main_tf = tf_dir / "modules" / "aks" / "main.tf"
+    if not main_tf.exists():
+        return False
+
+    content = main_tf.read_text(encoding="utf-8")
+
+    block_m = re.search(
+        r'(lifecycle\s*\{[^}]*?ignore_changes\s*=\s*\[)(.*?)(\s*\]\s*\})',
+        content, re.DOTALL,
+    )
+    if not block_m:
+        log("WARN", "  _auto_patch_aks_lifecycle: lifecycle block not found in main.tf")
+        return False
+
+    block_text = block_m.group(2)
+    existing: set[str] = set()
+    for f in re.findall(r'(default_node_pool\[\d+\]\.[^\s,]+)', block_text):
+        existing.add(f.strip())
+    for f in re.findall(r'(default_node_pool\.\d+\.[^\s,]+)', block_text):
+        existing.add(re.sub(r'\.(\d+)\.', r'[\1].', f).strip())
+
+    new_fields = [f for f in fields if f not in existing]
+    if not new_fields:
+        return False
+
+    additions = "\n".join(f"      {f}," for f in new_fields)
+    close_pos = block_m.start(3)
+    new_content = content[:close_pos] + "\n" + additions + content[close_pos:]
+    main_tf.write_text(new_content, encoding="utf-8")
+    log("WARN", f"  Auto-patched AKS lifecycle.ignore_changes — added: {new_fields}")
+    return True
+
+
+def _tf_plan(tf_dir: Path, plan_file: str = "tfplan", detailed_exitcode: bool = False) -> int:
+    """Run terraform plan with auto-healing for rotation errors and state locks.
+
+    Returns:
+      0  = no changes  (only meaningful when detailed_exitcode=True)
+      2  = changes pending
+      (never returns 1 — calls die() on unrecoverable failure)
+    """
+    flags = f"-out={plan_file}"
+    if detailed_exitcode:
+        flags += " -detailed-exitcode -lock=false"
+
+    for attempt in range(1, 5):
+        log("CMD", cyan(f"terraform plan {flags}"))
+        r = subprocess.run(
+            f"terraform plan {flags}",
+            shell=True, cwd=str(tf_dir),
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+        )
+        _fh().write((r.stdout or "") + (r.stderr or ""))
+        output = (r.stdout or "") + (r.stderr or "")
+
+        if r.returncode in (0, 2):
+            if r.returncode == 2:
+                for line in (r.stdout or "").splitlines():
+                    s = line.strip()
+                    if s.startswith(("#", "Plan:", "~", "+", "-")):
+                        print(f"  {line}")
+                print()
+            return r.returncode
+
+        # rc == 1: error — try to self-heal
+
+        # State lock
+        if re.search(r'state lock|already locked', output, re.IGNORECASE):
+            lock_id = _tf_extract_lock_id(output)
+            if lock_id:
+                log("WARN", f"Stale state lock ({lock_id}) — force-unlocking and retrying …")
+                subprocess.run(f"terraform force-unlock -force {lock_id}",
+                               shell=True, cwd=str(tf_dir), capture_output=True)
+                continue
+
+        # temporary_name_for_rotation required — patch lifecycle and retry
+        if re.search(r'temporary_name_for_rotation', output):
+            fields = _parse_rotation_required_fields(output)
+            if fields:
+                patched = _auto_patch_aks_lifecycle(fields, tf_dir)
+                if patched:
+                    log("WARN", f"  Plan attempt {attempt}: AKS lifecycle patched — re-planning …")
+                    continue
+            log("WARN", f"  Plan attempt {attempt}: temporary_name_for_rotation error but no patch needed — retrying …")
+            time.sleep(5)
+            continue
+
+        # Throttle / transient Azure errors
+        if re.search(r'429|Too Many Requests|RetryableError|RequestTimeout', output, re.IGNORECASE):
+            wait = 30 * attempt
+            log("WARN", f"  Azure throttling detected — waiting {wait}s before retry …")
+            time.sleep(wait)
+            continue
+
+        # Unrecoverable
+        log("WARN", f"Terraform plan error (attempt {attempt}): {output[:400]}")
+        if attempt < 4:
+            time.sleep(5)
+            continue
+        die(f"Terraform plan failed after {attempt} attempts — see log for details")
+
+    die("Terraform plan failed after retries")
+    return 1  # unreachable but satisfies type checker
 
 
 def tf_apply(plan_file: str, cwd: Path) -> list[tuple[str, str]]:
@@ -351,14 +479,17 @@ def tf_apply(plan_file: str, cwd: Path) -> list[tuple[str, str]]:
                         if full_id:
                             already_exists.append((diag_addr, full_id))
                             log("WARN", f"  will auto-import {diag_addr}")
-                    # Case 4: AKS temporary pool 400 — VM size not available for rotation.
-                    # The fix is already in Terraform code (only_critical_addons_enabled in
-                    # ignore_changes), so a re-plan will produce a no-op for the AKS cluster.
-                    # Returning an empty already_exists lets the caller's SystemExit handler
-                    # catch this and re-plan, at which point the diff disappears.
-                    elif re.search(r'temporary Agent Pool|temporary_name_for_rotation', detail) and re.search(r'400|Bad Request|not allowed', detail):
-                        log("WARN", f"  AKS temporary pool creation failed (VM size unavailable) — "
-                                     "will re-plan; the ignore_changes fix will suppress this diff.")
+                    # Case 4: temporary_name_for_rotation required — parse the failing fields,
+                    # auto-patch lifecycle.ignore_changes in modules/aks/main.tf, and return
+                    # a "__patched__" sentinel so the caller re-plans instead of hard-failing.
+                    elif re.search(r'temporary_name_for_rotation', detail):
+                        fields = _parse_rotation_required_fields(detail)
+                        patched = _auto_patch_aks_lifecycle(fields, cwd) if fields else False
+                        if patched:
+                            already_exists.append(("__patched__", "aks_lifecycle"))
+                            log("WARN", "  Auto-patched AKS lifecycle.ignore_changes — will re-plan")
+                        else:
+                            log("WARN", "  AKS temporary_name_for_rotation: no new fields to patch — will re-plan")
             elif level == "warning":
                 print(f"  {yellow(detail[:200])}")
 
@@ -1079,62 +1210,37 @@ def _terraform_drift_apply(state: dict):
                 shell=True, cwd=str(tf_dir), env=os.environ.copy(),
             )
 
-    # Plan — exit code 0 = no changes, 1 = error, 2 = changes pending.
-    r = subprocess.run(
-        "terraform plan -detailed-exitcode -lock=false -out=tfplan",
-        shell=True, cwd=str(tf_dir),
-        capture_output=True, text=True, encoding="utf-8", errors="replace",
-    )
-    if r.returncode == 0:
+    # Plan — exit code 0 = no changes, 2 = changes pending.  _tf_plan auto-heals
+    # state locks, rotation errors and throttling before returning.
+    rc = _tf_plan(tf_dir, detailed_exitcode=True)
+    if rc == 0:
         log("OK", "Terraform: no changes — infrastructure up to date")
         return
-    if r.returncode == 1:
-        err = r.stderr or r.stdout or ""
-        if "state lock" in err.lower() or "already locked" in err.lower():
-            lock_id = _tf_extract_lock_id(err)
-            if lock_id:
-                log("WARN", f"Stale state lock (ID: {lock_id}) — force-unlocking …")
-                subprocess.run(f"terraform force-unlock -force {lock_id}",
-                               shell=True, cwd=str(tf_dir), capture_output=True)
-                r = subprocess.run(
-                    "terraform plan -detailed-exitcode -out=tfplan",
-                    shell=True, cwd=str(tf_dir),
-                    capture_output=True, text=True, encoding="utf-8", errors="replace",
-                )
-                if r.returncode != 2:
-                    log("WARN", f"Terraform plan failed after unlock: {(r.stderr or r.stdout)[:200]}")
-                    return
-            else:
-                log("WARN", f"Terraform plan failed (lock — no ID found): {err[:200]}")
-                return
-        else:
-            log("WARN", f"Terraform plan failed: {err[:200]}")
-            return
 
-    # exit code 2 = changes pending — show what will change, then apply with retry loop.
-    log("WARN", "Terraform drift detected — changes to apply:")
-    for line in (r.stdout or "").splitlines():
-        stripped = line.strip()
-        if stripped.startswith("#") or stripped.startswith("Plan:") or stripped.startswith("~") or stripped.startswith("+") or stripped.startswith("-"):
-            print(f"  {line}")
-    print()
-
-    log("WARN", "Auto-applying terraform drift …")
+    log("WARN", "Terraform drift detected — auto-applying …")
     MAX_DRIFT_ATTEMPTS = 3
     for attempt in range(1, MAX_DRIFT_ATTEMPTS + 1):
         try:
             to_import = tf_apply("tfplan", cwd=tf_dir)
             if to_import:
-                log("WARN", f"Found {len(to_import)} resource(s) needing import — importing and re-planning …")
-                for tf_addr, azure_id in to_import:
+                patched = [(a, i) for a, i in to_import if a == "__patched__"]
+                imports = [(a, i) for a, i in to_import if a != "__patched__"]
+                if patched:
+                    log("WARN", "HCL patched — re-planning …")
+                    if attempt == MAX_DRIFT_ATTEMPTS:
+                        log("WARN", "Terraform auto-apply failed after retries — continuing (manual apply may be needed)")
+                        return
+                    _tf_plan(tf_dir)
+                    continue
+                log("WARN", f"Found {len(imports)} resource(s) needing import — importing and re-planning …")
+                for tf_addr, azure_id in imports:
                     log("INFO", f"  terraform import {tf_addr}")
                     subprocess.run(f'terraform import "{tf_addr}" "{azure_id}"',
                                    shell=True, cwd=str(tf_dir), env=os.environ.copy())
                 if attempt == MAX_DRIFT_ATTEMPTS:
                     log("WARN", "Terraform auto-apply failed after retries — continuing (manual apply may be needed)")
                     return
-                subprocess.run("terraform plan -out=tfplan", shell=True, cwd=str(tf_dir),
-                               env=os.environ.copy(), capture_output=True)
+                _tf_plan(tf_dir)
                 continue
             log("OK", "Terraform drift resolved")
             return
@@ -1144,8 +1250,7 @@ def _terraform_drift_apply(state: dict):
                 return
             log("WARN", f"Apply failed on attempt {attempt} — re-planning before retry …")
             time.sleep(5)
-            subprocess.run("terraform plan -out=tfplan", shell=True, cwd=str(tf_dir),
-                           env=os.environ.copy(), capture_output=True)
+            _tf_plan(tf_dir)
 
 
 def phase4_terraform(state: dict):
@@ -1188,7 +1293,7 @@ def phase4_terraform(state: dict):
     MAX_ATTEMPTS = 5
     for attempt in range(1, MAX_ATTEMPTS + 1):
         log("INFO", f"Planning infrastructure (attempt {attempt}/{MAX_ATTEMPTS}) …")
-        run("terraform plan -out=tfplan", cwd=tf_dir)
+        _tf_plan(tf_dir)
 
         if attempt == 1:
             confirm = input(f"\n  {yellow('Apply the plan above? [y/N]: ')}").strip().lower()
@@ -1200,13 +1305,20 @@ def phase4_terraform(state: dict):
         try:
             to_import = tf_apply("tfplan", cwd=tf_dir)
             if to_import:
-                # Resources exist in Azure but not in state — import them, then retry
-                log("WARN", f"Found {len(to_import)} resource(s) that exist in Azure but not in state — importing …")
-                for tf_addr, azure_id in to_import:
+                patched  = [(a, i) for a, i in to_import if a == "__patched__"]
+                imports  = [(a, i) for a, i in to_import if a != "__patched__"]
+                if patched:
+                    log("WARN", "HCL patched — re-planning and retrying …")
+                    if attempt == MAX_ATTEMPTS:
+                        die("Terraform apply failed after max attempts — check errors above")
+                    time.sleep(3)
+                    continue
+                log("WARN", f"Found {len(imports)} resource(s) that exist in Azure but not in state — importing …")
+                for tf_addr, azure_id in imports:
                     log("INFO", f"  terraform import {tf_addr}")
                     run(f'terraform import "{tf_addr}" "{azure_id}"', cwd=tf_dir, check=False)
                 if attempt == MAX_ATTEMPTS:
-                    die("Terraform apply failed after 3 attempts — check errors above")
+                    die("Terraform apply failed after max attempts — check errors above")
                 log("INFO", "Import done — re-planning …")
                 time.sleep(3)
                 continue
@@ -1214,7 +1326,7 @@ def phase4_terraform(state: dict):
             break  # success
         except SystemExit:
             if attempt == MAX_ATTEMPTS:
-                die("Terraform apply failed after 3 attempts — check errors above")
+                die("Terraform apply failed after max attempts — check errors above")
             log("WARN", f"Apply failed on attempt {attempt} — re-planning before retry …")
             time.sleep(5)
 
