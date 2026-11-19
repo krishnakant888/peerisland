@@ -19,6 +19,13 @@ spec:
     server: https://kubernetes.default.svc
     namespace: monitoring
 
+  ignoreDifferences:
+    - group: apps
+      kind: StatefulSet
+      name: mimir
+      jsonPointers:
+        - /spec/template/metadata/annotations/kubectl.kubernetes.io~1restartedAt
+
   syncPolicy:
     automated:
       prune: true
