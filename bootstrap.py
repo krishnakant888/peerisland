@@ -2332,14 +2332,18 @@ class _ArgoStatusWidget:
             return
         self._stop.set()
         if self._thread:
-            self._thread.join(timeout=3)
+            self._thread.join(timeout=1)  # don't wait long — just let it finish
         with self._lock:
-            sys.stdout.write(
-                "\033[r"                          # reset scroll region
-                "\033[1;1H"                       # top of screen
-                + ("\033[2K\n" * self.HEIGHT)     # erase widget rows
-                + "\033[1;1H"                     # cursor back to top
-            )
+            # \033[r  — reset scroll region to full screen
+            # \0337   — save cursor (DEC)
+            # \033[1;1H — go to widget top
+            # \033[2K\033[1B × HEIGHT — erase each row, step down (no scroll)
+            # \0338   — restore saved cursor
+            out = "\033[r\0337\033[1;1H"
+            for _ in range(self.HEIGHT):
+                out += "\033[2K\033[1B"
+            out += "\0338"
+            sys.stdout.write(out)
             sys.stdout.flush()
 
     # ── internals ─────────────────────────────────────────────────────────────
@@ -2424,9 +2428,23 @@ def _start_argocd_widget():
     global _argocd_widget
     if _argocd_widget is None and sys.stdout.isatty():
         _argocd_widget = _ArgoStatusWidget()
-        _argocd_widget.stop_fn = _argocd_widget.stop   # expose for atexit
-        import atexit
+
+        import atexit, signal
+
+        # atexit covers normal exits and unhandled exceptions
         atexit.register(_argocd_widget.stop)
+
+        # SIGINT (Ctrl+C) — stop widget synchronously then re-raise so Python
+        # prints the standard "^C" / exits with code 130
+        _prev_sigint = signal.getsignal(signal.SIGINT)
+        def _sigint_handler(sig, frame):
+            _argocd_widget.stop()
+            if callable(_prev_sigint):
+                _prev_sigint(sig, frame)
+            else:
+                raise KeyboardInterrupt
+        signal.signal(signal.SIGINT, _sigint_handler)
+
         _argocd_widget.start()
 
 
