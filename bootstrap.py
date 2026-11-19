@@ -875,6 +875,36 @@ def phase3_github_secrets(state: dict):
 #  PHASE 4 — Provision Azure infra (Terraform)
 # ═════════════════════════════════════════════════════════════════════════════
 
+def _terraform_drift_apply(state: dict):
+    """Run terraform plan on every bootstrap re-run; auto-apply if drift detected (no prompt)."""
+    tf_dir = REPO_ROOT / "terraform"
+    if not (tf_dir / "terraform.tfvars").exists():
+        return
+    log("INFO", "Checking terraform for infrastructure drift …")
+    r = subprocess.run(
+        "terraform plan -detailed-exitcode -out=tfplan",
+        shell=True, cwd=str(tf_dir),
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+    )
+    if r.returncode == 0:
+        log("OK", "Terraform: no changes — infrastructure up to date")
+        return
+    if r.returncode == 1:
+        log("WARN", f"Terraform plan failed: {(r.stderr or r.stdout)[:200]}")
+        return
+    # exit code 2 = changes pending
+    log("WARN", "Terraform drift detected — auto-applying …")
+    apply_r = subprocess.run(
+        "terraform apply -auto-approve tfplan",
+        shell=True, cwd=str(tf_dir),
+        text=True, encoding="utf-8", errors="replace",
+    )
+    if apply_r.returncode != 0:
+        log("WARN", "Terraform auto-apply failed — continuing (manual apply may be needed)")
+    else:
+        log("OK", "Terraform drift resolved")
+
+
 def phase4_terraform(state: dict):
     phase_header(4, "Provision Azure infrastructure (Terraform)")
     tf_dir = REPO_ROOT / "terraform"
@@ -1778,6 +1808,9 @@ def main():
         if n not in PHASES:
             die(f"Unknown phase: {n}")
         if not should_run(state, n, args.start_from):
+            # Phase 4 already done: still check for terraform drift and auto-apply
+            if n == 4:
+                _terraform_drift_apply(state)
             continue
         _, fn = PHASES[n]
         try:
