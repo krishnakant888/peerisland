@@ -308,27 +308,46 @@ def _install_win(tool: str) -> bool:
             log("OK", f"argocd {v} → {_TOOLS_DIR}")
 
         elif tool == "kustomize":
-            # Fetch latest kustomize release tag from GitHub API
+            # Get the actual asset download URL from GitHub API (avoids URL construction errors)
+            asset_url = ""
+            v = "unknown"
             try:
-                with urllib.request.urlopen(
-                    "https://api.github.com/repos/kubernetes-sigs/kustomize/releases?per_page=20",
-                    timeout=10,
-                ) as r:
-                    rels = json.loads(r.read())
-                v = next(
-                    rel["tag_name"].replace("kustomize/", "")
-                    for rel in rels
-                    if rel["tag_name"].startswith("kustomize/")
+                req = urllib.request.Request(
+                    "https://api.github.com/repos/kubernetes-sigs/kustomize/releases?per_page=30",
+                    headers={"Accept": "application/vnd.github+json"},
                 )
-            except Exception:
+                with urllib.request.urlopen(req, timeout=15) as r:
+                    rels = json.loads(r.read())
+                for rel in rels:
+                    if not rel["tag_name"].startswith("kustomize/"):
+                        continue
+                    for asset in rel.get("assets", []):
+                        if "windows_amd64" in asset["name"] and asset["name"].endswith(".tar.gz"):
+                            asset_url = asset["browser_download_url"]
+                            v = rel["tag_name"].replace("kustomize/", "")
+                            break
+                    if asset_url:
+                        break
+            except Exception as api_err:
+                log("WARN", f"GitHub API error: {api_err} — falling back to hardcoded version")
+
+            if not asset_url:
                 v = _VERSIONS["kustomize"]
-            url = (f"https://github.com/kubernetes-sigs/kustomize/releases/download/"
-                   f"kustomize%2F{v}/kustomize_{v}_windows_amd64.tar.gz")
+                asset_url = (
+                    f"https://github.com/kubernetes-sigs/kustomize/releases/download/"
+                    f"kustomize%2F{v}/kustomize_{v}_windows_amd64.tar.gz"
+                )
             with tempfile.TemporaryDirectory() as tmp:
                 tgz = Path(tmp) / "kustomize.tar.gz"
-                _fetch(url, tgz)
+                _fetch(asset_url, tgz)
                 with tarfile.open(tgz) as tf:
-                    tf.extract("kustomize.exe", _TOOLS_DIR)
+                    # The exe may be just "kustomize.exe" or bare "kustomize"
+                    names = tf.getnames()
+                    exe = next((n for n in names if "kustomize" in n.lower()), names[0])
+                    tf.extract(exe, _TOOLS_DIR)
+                    extracted = _TOOLS_DIR / exe
+                    if extracted.name != "kustomize.exe":
+                        extracted.rename(_TOOLS_DIR / "kustomize.exe")
             log("OK", f"kustomize {v} → {_TOOLS_DIR}")
 
         else:
