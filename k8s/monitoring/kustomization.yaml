@@ -4,7 +4,7 @@ kind: Kustomization
 resources:
   - otel-collector-service.yaml
   - secret-provider-grafana.yaml
-  - prometheus-rule.yaml
+  - grafana-alert-rules.yaml
   - grafana-dashboards.yaml
   - network-policies.yaml
   - daily-report-cronjob.yaml

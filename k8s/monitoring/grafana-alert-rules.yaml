@@ -1,0 +1,116 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-alert-rules
+  namespace: monitoring
+  labels:
+    grafana_alert: "1"   # picked up by Grafana sidecar
+data:
+  peerisland-alerts.yaml: |
+    apiVersion: 1
+    groups:
+      - name: peerisland-backend
+        folder: PeerIsland
+        orgId: 1
+        interval: 1m
+        rules:
+
+          - uid: backend-high-error-rate
+            title: BackendHighErrorRate
+            condition: A
+            data:
+              - refId: A
+                datasourceUid: mimir
+                relativeTimeRange: {from: 300, to: 0}
+                model:
+                  expr: |
+                    sum(rate(http_requests_total{namespace="peerisland",status_code=~"5.."}[5m]))
+                    /
+                    sum(rate(http_requests_total{namespace="peerisland"}[5m])) > 0.05
+                  instant: true
+                  refId: A
+            for: 5m
+            noDataState: NoData
+            execErrState: Error
+            annotations:
+              summary: "Backend error rate above 5%"
+              description: "Error rate is {{ $value | humanizePercentage }} over the last 5 minutes."
+            labels:
+              severity: critical
+              team: platform
+            isPaused: false
+
+          - uid: backend-high-p99-latency
+            title: BackendHighP99Latency
+            condition: A
+            data:
+              - refId: A
+                datasourceUid: mimir
+                relativeTimeRange: {from: 600, to: 0}
+                model:
+                  expr: |
+                    histogram_quantile(0.99,
+                      sum by(le) (rate(http_request_duration_seconds_bucket{namespace="peerisland"}[5m]))
+                    ) > 1
+                  instant: true
+                  refId: A
+            for: 10m
+            noDataState: NoData
+            execErrState: Error
+            annotations:
+              summary: "Backend p99 latency above 1 second"
+              description: "p99 latency is {{ $value | humanizeDuration }} over the last 10 minutes."
+            labels:
+              severity: warning
+              team: platform
+            isPaused: false
+
+          - uid: backend-pod-crash-looping
+            title: BackendPodCrashLooping
+            condition: A
+            data:
+              - refId: A
+                datasourceUid: mimir
+                relativeTimeRange: {from: 900, to: 0}
+                model:
+                  expr: |
+                    sum by(pod) (
+                      increase(kube_pod_container_status_restarts_total{namespace="peerisland",container="backend"}[15m])
+                    ) > 3
+                  instant: true
+                  refId: A
+            for: 0s
+            noDataState: NoData
+            execErrState: Error
+            annotations:
+              summary: "Backend pod {{ $labels.pod }} is crash-looping"
+              description: "Pod restarted {{ $value | humanize }} times in the last 15 minutes."
+            labels:
+              severity: critical
+              team: platform
+            isPaused: false
+
+          - uid: backend-hpa-at-max
+            title: HPAAtMaxReplicas
+            condition: A
+            data:
+              - refId: A
+                datasourceUid: mimir
+                relativeTimeRange: {from: 600, to: 0}
+                model:
+                  expr: |
+                    kube_horizontalpodautoscaler_status_current_replicas{namespace="peerisland",horizontalpodautoscaler="backend"}
+                    ==
+                    kube_horizontalpodautoscaler_spec_max_replicas{namespace="peerisland",horizontalpodautoscaler="backend"}
+                  instant: true
+                  refId: A
+            for: 10m
+            noDataState: NoData
+            execErrState: Error
+            annotations:
+              summary: "Backend HPA at maximum replicas"
+              description: "HPA has been at maxReplicas ({{ $value }}) for over 10 minutes."
+            labels:
+              severity: warning
+              team: platform
+            isPaused: false
