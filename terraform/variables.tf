@@ -19,7 +19,7 @@ variable "project_name" {
 variable "kubernetes_version" {
   description = "Kubernetes version for AKS"
   type        = string
-  default     = "1.29.9"
+  default     = "1.31"
 }
 
 variable "node_pool_vm_size" {
