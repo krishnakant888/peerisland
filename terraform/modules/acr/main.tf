@@ -10,8 +10,4 @@ resource "azurerm_container_registry" "main" {
 
   # Admin access disabled; AKS uses managed identity pull
   admin_enabled = false
-
-  network_rule_set {
-    default_action = "Deny"
-  }
 }
