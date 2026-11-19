@@ -83,7 +83,8 @@ resource "azurerm_role_assignment" "aks_kv_secrets_user" {
 }
 
 resource "azurerm_kubernetes_cluster_node_pool" "user" {
-  name                  = "user"
+  name                        = "user"
+  temporary_name_for_rotation = "usertmp"
   kubernetes_cluster_id = azurerm_kubernetes_cluster.main.id
   vm_size               = var.node_pool_vm_size
   auto_scaling_enabled  = true
