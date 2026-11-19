@@ -2748,6 +2748,7 @@ def phase10_rollouts(state: dict):
     phase_header(10, "Watch & promote Rollouts (first deploy)")
     _require_tool("kubectl-argo-rollouts")
     _ensure_kubectl_auth(state)
+    _ensure_argocd_resources_patched()   # apply argocd-values.yaml (no-op if unchanged)
     _argocd_global_rpc_check_and_fix()
 
     # ── Ensure peerisland namespace exists (ArgoCD may not have synced yet) ───
