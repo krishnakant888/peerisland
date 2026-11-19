@@ -1530,6 +1530,41 @@ def phase8_wait_argocd(state: dict):
             check=False,
         )
 
+    # Ensure argocd-cm has kustomize load-restrictor disabled (may have been
+    # applied in Phase 7, but on a re-run we verify and re-apply if missing)
+    cm_check = subprocess.run(
+        "kubectl get configmap argocd-cm -n argocd "
+        "-o jsonpath='{.data.kustomize\\.buildOptions}'",
+        shell=True, capture_output=True, text=True, encoding="utf-8",
+    )
+    if "LoadRestrictionsNone" not in (cm_check.stdout or ""):
+        log("WARN", "argocd-cm missing kustomize.buildOptions — patching now …")
+        subprocess.run(
+            "kubectl patch configmap argocd-cm -n argocd --type=merge "
+            '--patch \'{"data":{"kustomize.buildOptions":"--load-restrictor LoadRestrictionsNone"}}\'',
+            shell=True, capture_output=True,
+        )
+        subprocess.run(
+            "kubectl rollout restart deployment argocd-repo-server -n argocd",
+            shell=True, capture_output=True,
+        )
+        subprocess.run(
+            "kubectl rollout status deployment argocd-repo-server -n argocd --timeout=120s",
+            shell=True,
+        )
+        log("OK", "argocd-repo-server restarted with kustomize load-restrictor fix")
+    else:
+        log("OK", "argocd-cm kustomize.buildOptions already set — OK")
+
+    # Hard-refresh peerisland-app so repo-server re-evaluates after patch
+    subprocess.run(
+        "kubectl annotate application peerisland-app -n argocd "
+        "argocd.argoproj.io/refresh=hard --overwrite",
+        shell=True, capture_output=True,
+    )
+    log("INFO", "Hard-refreshed peerisland-app — waiting 15s for re-evaluation …")
+    time.sleep(15)
+
     # Expected applications in wave order
     expected = [
         # wave 0
