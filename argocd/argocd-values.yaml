@@ -80,6 +80,8 @@ configs:
     server.insecure: false
   cm:
     users.anonymous.enabled: "false"
+    # Required for kustomize overlays that use ../../ path traversal (e.g. peerisland app)
+    kustomize.buildOptions: "--load-restrictor LoadRestrictionsNone"
     resource.customizations.ignoreDifferences.admissionregistration.k8s.io_MutatingWebhookConfiguration: |
       jqPathExpressions:
         - ".webhooks[]?.clientConfig.caBundle"
