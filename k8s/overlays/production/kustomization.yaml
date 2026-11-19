@@ -32,6 +32,8 @@ patches:
     kind: Rollout
     name: frontend
 
-commonLabels:
-  environment: production
-  managed-by: argocd
+labels:
+- pairs:
+    environment: production
+    managed-by: argocd
+  includeSelectors: false
