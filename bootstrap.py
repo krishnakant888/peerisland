@@ -1382,6 +1382,21 @@ def _ensure_user_nodes(state: dict):
 def phase8_wait_argocd(state: dict):
     phase_header(8, "Wait for ArgoCD sync waves to complete")
 
+    # Print access credentials so the user can log in while sync is in progress
+    argocd_pw    = state["data"].get("argocd_password", "")
+    grafana_pw   = state["data"].get("grafana_admin_password", "")
+    nginx_ip     = state["data"].get("appgw_ip", "")
+    argocd_url   = f"https://{nginx_ip}" if nginx_ip else "(nginx LB IP pending)"
+    grafana_url  = f"http://{nginx_ip}/grafana" if nginx_ip else "(nginx LB IP pending)"
+    sep = "─" * 56
+    print(f"\n  {green('ACCESS SUMMARY')}")
+    print(f"  {sep}")
+    print(f"  ArgoCD   {argocd_url}")
+    print(f"           username: admin   password: {argocd_pw or '(check argocd-initial-admin-secret)'}")
+    print(f"  Grafana  {grafana_url}")
+    print(f"           username: admin   password: {grafana_pw or '(check grafana-admin-secret)'}")
+    print(f"  {sep}\n")
+
     # Auto-request vCPU quota increase if needed (Pay-As-You-Go accounts auto-approve small requests)
     _ensure_vcpu_quota(state, vcpus_needed=8)
 
