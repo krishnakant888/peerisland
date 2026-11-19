@@ -36,6 +36,9 @@ data:
       tsdb:
         dir: /data/tsdb
 
+    activity_tracker:
+      filepath: /data/metrics-activity.log
+
     limits:
       compactor_blocks_retention_period: 720h
 
