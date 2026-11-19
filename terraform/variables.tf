@@ -46,9 +46,9 @@ variable "node_pool_min_count" {
 }
 
 variable "user_node_pool_min_count" {
-  description = "Minimum number of nodes for the user node pool (0 = no nodes at creation, scales in when workloads land)"
+  description = "Minimum number of nodes for the user node pool"
   type        = number
-  default     = 0
+  default     = 1
 }
 
 variable "node_pool_max_count" {

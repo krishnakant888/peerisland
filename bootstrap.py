@@ -1187,8 +1187,42 @@ def phase7_argocd(state: dict):
 #  PHASE 8 — Wait for ArgoCD sync waves
 # ═════════════════════════════════════════════════════════════════════════════
 
+def _ensure_user_nodes(state: dict):
+    """Scale user node pool to 1 if it has 0 nodes — workload pods can't schedule otherwise."""
+    rg      = state["data"].get("aks_resource_group", "peerisland-prod-rg")
+    cluster = state["data"].get("aks_cluster_name",  "peerisland-prod-aks")
+
+    result = subprocess.run(
+        f"az aks nodepool show -g {rg} --cluster-name {cluster} --name user "
+        f"--query count -o tsv",
+        shell=True, capture_output=True, text=True, encoding="utf-8", errors="replace",
+    )
+    count = result.stdout.strip()
+    if count == "0" or count == "":
+        log("WARN", "User node pool has 0 nodes — scaling to 1 so workload pods can schedule …")
+        subprocess.run(
+            f"az aks nodepool scale -g {rg} --cluster-name {cluster} "
+            f"--name user --node-count 1",
+            shell=True, check=True, encoding="utf-8", errors="replace",
+        )
+        log("OK", "User node pool scaled to 1 — waiting for node to be Ready …")
+        # Wait up to 5 minutes for the new node
+        def node_ready():
+            r = subprocess.run(
+                "kubectl get nodes -l agentpool=user --no-headers",
+                shell=True, capture_output=True, text=True, encoding="utf-8",
+            )
+            return "Ready" in r.stdout
+        wait_for(node_ready, "user node Ready", timeout=300, interval=15)
+    else:
+        log("OK", f"User node pool has {count} node(s) — OK")
+
+
 def phase8_wait_argocd(state: dict):
     phase_header(8, "Wait for ArgoCD sync waves to complete")
+
+    # Ensure at least 1 user node exists — workload pods can't schedule on the system pool
+    _ensure_user_nodes(state)
 
     # Try ArgoCD CLI login for richer status checks
     argocd_pw = state["data"].get("argocd_password", "")
