@@ -11,9 +11,9 @@ variable "location" {
 }
 
 variable "sku" {
-  description = "ACR SKU - Premium required for geo-replication and content trust"
+  description = "ACR SKU - Standard is sufficient for single-region deployments"
   type        = string
-  default     = "Premium"
+  default     = "Standard"
 }
 
 variable "tags" {
