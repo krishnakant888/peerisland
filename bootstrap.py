@@ -152,7 +152,7 @@ def tf_apply(plan_file: str, cwd: Path) -> list[tuple[str, str]]:
     in_progress: dict[str, float] = {}
     created, updated, destroyed = [], [], []
     already_exists: list[tuple[str, str]] = []  # (tf_addr, azure_resource_id)
-    _last_diag_addr = [None]  # track which resource the last diagnostic belongs to
+    _pending_azure_ids: list[str] = []  # azure IDs from diagnostics waiting for their apply_errored addr
 
     action_sym = {"create": green("+ create"), "update": yellow("~ update"),
                   "delete": red("- destroy"), "read": cyan("⟳ read")}
@@ -199,7 +199,11 @@ def tf_apply(plan_file: str, cwd: Path) -> list[tuple[str, str]]:
 
         elif mtype == "apply_errored":
             print(f"  {red('✗')} {addr}  {red('FAILED')}")
-            _last_diag_addr[0] = addr
+            # Match any azure IDs collected from diagnostics that fired before this event
+            while _pending_azure_ids and addr:
+                azure_id = _pending_azure_ids.pop(0)
+                already_exists.append((addr, azure_id))
+                log("WARN", f"Will auto-import: {addr}")
 
         elif mtype == "change_summary":
             changes = msg.get("changes", {})
@@ -213,14 +217,23 @@ def tf_apply(plan_file: str, cwd: Path) -> list[tuple[str, str]]:
             detail = diag.get("detail", "") or text
             if level == "error":
                 print(f"  {red('ERR')} {detail[:200]}")
-                # Detect "already exists" — addr was set by apply_errored above
-                if "already exists" in detail and _last_diag_addr[0]:
-                    import re as _re
-                    id_match = _re.search(r'"/subscriptions/[^"]+?"', detail)
-                    if id_match:
-                        azure_id = id_match.group(0).strip('"')
-                        already_exists.append((_last_diag_addr[0], azure_id))
-                        log("WARN", f"Will auto-import: {_last_diag_addr[0]}")
+                import re as _re
+                # Case 1: "already exists" with Azure resource ID in message
+                id_match = _re.search(r'"/subscriptions/[^"]+?"', detail)
+                if id_match and ("already exists" in detail or "AlreadyExists" in detail):
+                    _pending_azure_ids.append(id_match.group(0).strip('"'))
+                # Case 2: RoleAssignmentExists 409 — look up full ID via az CLI
+                elif "RoleAssignmentExists" in detail or ("409" in detail and "roleAssignment" in detail.lower()):
+                    guid_match = _re.search(r'[0-9a-f]{32}', detail)
+                    if guid_match:
+                        raw_guid = guid_match.group(0)
+                        fmt_guid = f"{raw_guid[:8]}-{raw_guid[8:12]}-{raw_guid[12:16]}-{raw_guid[16:20]}-{raw_guid[20:]}"
+                        result = subprocess.run(
+                            f"az role assignment show --id {fmt_guid} --query id -o tsv",
+                            shell=True, capture_output=True, text=True,
+                        )
+                        if result.returncode == 0 and result.stdout.strip():
+                            _pending_azure_ids.append(result.stdout.strip())
             elif level == "warning":
                 print(f"  {yellow(detail[:200])}")
 
