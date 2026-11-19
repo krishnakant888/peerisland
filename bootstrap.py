@@ -31,6 +31,7 @@ import getpass
 import json
 import os
 import platform
+import re
 import subprocess
 import sys
 import tarfile
@@ -139,9 +140,25 @@ def capture(cmd, **kwargs) -> str:
     return run(cmd, capture=True, **kwargs).stdout.strip()
 
 
+def _lookup_role_assignment_id(guid_no_dashes: str) -> str:
+    """Given a bare 32-hex-char role assignment name, return its full Azure resource ID."""
+    fmt = (f"{guid_no_dashes[:8]}-{guid_no_dashes[8:12]}-"
+           f"{guid_no_dashes[12:16]}-{guid_no_dashes[16:20]}-{guid_no_dashes[20:]}")
+    r = subprocess.run(
+        f"az role assignment show --name {fmt} --query id -o tsv",
+        shell=True, capture_output=True, text=True, env=os.environ.copy(),
+    )
+    return r.stdout.strip() if r.returncode == 0 else ""
+
+
 def tf_apply(plan_file: str, cwd: Path) -> list[tuple[str, str]]:
-    """Run terraform apply with live JSON progress.
-    Returns list of (tf_addr, azure_id) for any 'already exists' errors found."""
+    """Stream terraform apply with live progress display.
+
+    Returns a list of (tf_addr, azure_resource_id) pairs for resources that
+    already exist in Azure but are missing from Terraform state, so the caller
+    can import them and retry.  Returns [] on success.  Calls sys.exit(1) on
+    any other failure.
+    """
     cmd = f"terraform apply -json {plan_file}"
     log("CMD", cyan(cmd))
     _fh().write(f"$ {cmd}\n")
@@ -151,14 +168,23 @@ def tf_apply(plan_file: str, cwd: Path) -> list[tuple[str, str]]:
 
     in_progress: dict[str, float] = {}
     created, updated, destroyed = [], [], []
-    already_exists: list[tuple[str, str]] = []  # (tf_addr, azure_resource_id)
-    _pending_azure_ids: list[str] = []  # azure IDs from diagnostics waiting for their apply_errored addr
 
-    action_sym = {"create": green("+ create"), "update": yellow("~ update"),
-                  "delete": red("- destroy"), "read": cyan("⟳ read")}
+    # Terraform fires "diagnostic" (with error detail + Azure ID) BEFORE
+    # "apply_errored" (with the tf resource address).  We collect the Azure IDs
+    # here and pair them with the address when apply_errored fires.
+    pending_azure_ids: list[str] = []
+    already_exists:    list[tuple[str, str]] = []
+
+    action_sym = {
+        "create": green("+ create"),
+        "update": yellow("~ update"),
+        "delete": red("- destroy"),
+        "read":   cyan("⟳ read"),
+    }
 
     proc = subprocess.Popen(
-        cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        cmd, shell=True,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         text=True, cwd=str(cwd), env=os.environ.copy(), bufsize=1,
     )
 
@@ -179,60 +205,55 @@ def tf_apply(plan_file: str, cwd: Path) -> list[tuple[str, str]]:
         res     = hook.get("resource", {}) or {}
         addr    = res.get("addr", "")
         action  = hook.get("action", "")
-        elapsed = hook.get("elapsed_seconds", 0)
+        elapsed = int(hook.get("elapsed_seconds", 0))
 
         if mtype == "apply_start":
             in_progress[addr] = time.time()
             print(f"  {action_sym.get(action, cyan('⟳'))}  {addr}")
 
         elif mtype == "apply_progress":
-            print(f"  {action_sym.get(action, cyan('⟳'))}  {addr}  {dim(f'[{int(elapsed)}s elapsed]')}")
+            print(f"  {action_sym.get(action, cyan('⟳'))}  {addr}  {dim(f'[{elapsed}s elapsed]')}")
 
         elif mtype == "apply_complete":
             dur = int(time.time() - in_progress.pop(addr, time.time()))
-            done_sym = green("✓") if action in ("create", "read") else (yellow("✓") if action == "update" else red("✓"))
-            print(f"  {done_sym} {action_sym.get(action, cyan('⟳'))}  {addr}  {dim(f'({dur}s)')}")
+            done = green("✓") if action in ("create", "read") else yellow("✓") if action == "update" else red("✓")
+            print(f"  {done} {action_sym.get(action, cyan('⟳'))}  {addr}  {dim(f'({dur}s)')}")
             if   action == "create":  created.append(addr)
             elif action == "update":  updated.append(addr)
             elif action == "delete":  destroyed.append(addr)
 
         elif mtype == "apply_errored":
             print(f"  {red('✗')} {addr}  {red('FAILED')}")
-            # Match any azure IDs collected from diagnostics that fired before this event
-            while _pending_azure_ids and addr:
-                azure_id = _pending_azure_ids.pop(0)
-                already_exists.append((addr, azure_id))
-                log("WARN", f"Will auto-import: {addr}")
+            # Pair all pending Azure IDs (collected from diagnostics) with this addr
+            if addr:
+                for azure_id in pending_azure_ids:
+                    already_exists.append((addr, azure_id))
+                    log("WARN", f"  will auto-import {addr}")
+            pending_azure_ids.clear()
 
         elif mtype == "change_summary":
             changes = msg.get("changes", {})
             print(f"\n  {bold('Apply complete!')}  "
-                  f"{green(str(changes.get('add',0)) + ' added')}  "
-                  f"{yellow(str(changes.get('change',0)) + ' changed')}  "
-                  f"{red(str(changes.get('remove',0)) + ' destroyed')}")
+                  f"{green(str(changes.get('add', 0)) + ' added')}  "
+                  f"{yellow(str(changes.get('change', 0)) + ' changed')}  "
+                  f"{red(str(changes.get('remove', 0)) + ' destroyed')}")
 
         elif mtype == "diagnostic":
             diag   = msg.get("diagnostic", {}) or {}
             detail = diag.get("detail", "") or text
             if level == "error":
-                print(f"  {red('ERR')} {detail[:200]}")
-                import re as _re
-                # Case 1: "already exists" with Azure resource ID in message
-                id_match = _re.search(r'"/subscriptions/[^"]+?"', detail)
-                if id_match and ("already exists" in detail or "AlreadyExists" in detail):
-                    _pending_azure_ids.append(id_match.group(0).strip('"'))
-                # Case 2: RoleAssignmentExists 409 — look up full ID via az CLI
-                elif "RoleAssignmentExists" in detail or ("409" in detail and "roleAssignment" in detail.lower()):
-                    guid_match = _re.search(r'[0-9a-f]{32}', detail)
+                print(f"  {red('ERR')} {detail[:300]}")
+                # Case 1: resource already exists — Azure ID is in the error text
+                id_match = re.search(r'"/subscriptions/[^"]+?"', detail)
+                if id_match and re.search(r'already exists', detail, re.IGNORECASE):
+                    pending_azure_ids.append(id_match.group(0).strip('"'))
+                # Case 2: role assignment 409 — derive full ID from bare GUID
+                elif re.search(r'RoleAssignment(Exists|Already)', detail):
+                    guid_match = re.search(r'\b([0-9a-f]{32})\b', detail)
                     if guid_match:
-                        raw_guid = guid_match.group(0)
-                        fmt_guid = f"{raw_guid[:8]}-{raw_guid[8:12]}-{raw_guid[12:16]}-{raw_guid[16:20]}-{raw_guid[20:]}"
-                        result = subprocess.run(
-                            f"az role assignment show --id {fmt_guid} --query id -o tsv",
-                            shell=True, capture_output=True, text=True,
-                        )
-                        if result.returncode == 0 and result.stdout.strip():
-                            _pending_azure_ids.append(result.stdout.strip())
+                        full_id = _lookup_role_assignment_id(guid_match.group(1))
+                        if full_id:
+                            pending_azure_ids.append(full_id)
             elif level == "warning":
                 print(f"  {yellow(detail[:200])}")
 
@@ -247,7 +268,7 @@ def tf_apply(plan_file: str, cwd: Path) -> list[tuple[str, str]]:
 
     if proc.returncode != 0:
         if already_exists:
-            return already_exists  # caller will import and retry
+            return already_exists   # caller imports and retries
         log("ERR", f"terraform apply failed (exit {proc.returncode})")
         sys.exit(1)
 
