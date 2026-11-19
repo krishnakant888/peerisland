@@ -52,11 +52,33 @@ LOG_FILE   = REPO_ROOT / "bootstrap.log"
 
 # ── ANSI colours ──────────────────────────────────────────────────────────────
 
+def _init_color() -> bool:
+    """Enable ANSI VT processing on Windows; return True if colors work."""
+    if os.environ.get("NO_COLOR"):
+        return False
+    if not sys.stdout.isatty():
+        return False
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            kernel32 = ctypes.windll.kernel32
+            # Get current stdout console mode and add ENABLE_VIRTUAL_TERMINAL_PROCESSING (0x4)
+            handle = kernel32.GetStdHandle(-11)  # STD_OUTPUT_HANDLE
+            mode = ctypes.c_ulong(0)
+            if kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+                kernel32.SetConsoleMode(handle, mode.value | 0x4)
+            return True
+        except Exception:
+            return False
+    return True
+
+_USE_COLOR = _init_color()
+
 RESET = "\033[0m"; BOLD = "\033[1m"; DIM = "\033[2m"
 RED   = "\033[31m"; GREEN  = "\033[32m"; YELLOW = "\033[33m"
 BLUE  = "\033[34m"; CYAN   = "\033[36m"; WHITE  = "\033[37m"
 
-def _c(codes, text): return f"{codes}{text}{RESET}"
+def _c(codes, text): return f"{codes}{text}{RESET}" if _USE_COLOR else text
 def red(t):    return _c(RED + BOLD, t)
 def green(t):  return _c(GREEN, t)
 def yellow(t): return _c(YELLOW, t)
@@ -2467,23 +2489,47 @@ def _print_argocd_status_table(label: str = "ArgoCD Apps"):
         items = json.loads(r.stdout).get("items", [])
     except Exception:
         return {}
-    sep = "─" * 70
-    print(f"\n  {bold(label)}  ({len(items)} found)")
-    print(f"  {dim(sep)}")
+
+    rows = []
     for a in sorted(items, key=lambda x: x["metadata"]["name"]):
         name   = a["metadata"]["name"]
         s      = a.get("status", {})
         sync   = s.get("sync",   {}).get("status", "Unknown")
         health = s.get("health", {}).get("status", "Unknown")
         ok     = sync == "Synced" and health in ("Healthy", "Progressing")
-        icon   = green("✓") if ok else red("✗")
         cond_msgs = [c.get("message", "") for c in s.get("conditions", [])]
         hmsg      = s.get("health", {}).get("message", "")
-        errs      = [m for m in (cond_msgs + [hmsg]) if m]
-        print(f"  {icon}  {name:<42}  {dim(sync + '/' + health)}")
-        for e in errs[:2]:
-            print(f"       {yellow(e[:100])}")
-    print(f"  {dim(sep)}\n")
+        errs      = [m.strip() for m in (cond_msgs + [hmsg]) if m.strip()]
+        rows.append((name, sync, health, ok, errs))
+
+    name_w   = max((len(r[0]) for r in rows), default=20) + 2
+    sync_w   = max((len(r[1]) for r in rows), default=10)
+    health_w = max((len(r[2]) for r in rows), default=10)
+    sep      = "-" * (name_w + sync_w + health_w + 10)
+
+    print(f"\n  {bold(label)}  ({len(items)} found)")
+    print(f"  {sep}")
+    hdr = f"  {'APP':<{name_w}}  {'SYNC':<{sync_w}}  {'HEALTH':<{health_w}}"
+    print(bold(hdr) if _USE_COLOR else hdr)
+    print(f"  {sep}")
+    for name, sync, health, ok, errs in rows:
+        status_col = f"{sync:<{sync_w}}  {health:<{health_w}}"
+        if ok:
+            line = f"  {green('OK')}  {name:<{name_w}}  {status_col}"
+        else:
+            line = f"  {red('!!')}  {name:<{name_w}}  {status_col}"
+        print(line)
+        for e in errs[:1]:
+            # Trim the error to something readable — strip long path prefixes
+            short = e
+            for prefix in ("Failed to load target state: failed to generate manifest for source 1 of 1: ",
+                           "Failed to load target state: failed to generate manifest for source 1 of 2: ",
+                           "Failed sync attempt to v"):
+                if short.startswith(prefix):
+                    short = short[len(prefix):]
+                    break
+            print(f"      -> {short[:110]}")
+    print(f"  {sep}\n")
     return {a["metadata"]["name"]: a.get("status", {}) for a in items}
 
 
