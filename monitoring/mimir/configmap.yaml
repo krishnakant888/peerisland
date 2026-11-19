@@ -5,7 +5,7 @@ metadata:
   namespace: monitoring
 data:
   mimir.yaml: |
-    target: all,alertmanager
+    target: all
     multitenancy_enabled: false
 
     server:
@@ -18,11 +18,6 @@ data:
       filesystem:
         dir: /data/blocks
 
-    alertmanager_storage:
-      backend: filesystem
-      filesystem:
-        dir: /data/alertmanager
-
     ruler_storage:
       backend: filesystem
       filesystem:
@@ -30,7 +25,3 @@ data:
 
     compactor:
       blocks_retention_period: 720h
-
-    limits:
-      ingestion_rate: 10000
-      max_global_series_per_user: 1500000
