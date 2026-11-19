@@ -35,13 +35,13 @@ app.use(express.json());
 
 app.use((req, res, next) => {
   const end = httpRequestDuration.startTimer();
+  const span = trace.getActiveSpan();
+  const traceId = span?.spanContext().traceId;
+  if (traceId) res.setHeader('X-Trace-Id', traceId);
   res.on('finish', () => {
     const labels = { method: req.method, route: req.route?.path ?? req.path, status_code: res.statusCode };
-    const span = trace.getActiveSpan();
-    const traceId = span?.spanContext().traceId;
     httpRequestsTotal.inc(labels);
     end(labels);
-    if (traceId) res.setHeader('X-Trace-Id', traceId);
   });
   next();
 });
