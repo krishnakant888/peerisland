@@ -642,15 +642,16 @@ _verified_tools: set[str] = set()
 
 
 _TOOL_PROBES = {
-    "az":        "az version",
-    "kubectl":   "kubectl version --client",
-    "kubelogin": "kubelogin --version",
-    "helm":      "helm version",
-    "argocd":    "argocd version --client",
-    "kustomize": "kustomize version",
-    "terraform": "terraform --version",
-    "gh":        "gh --version",
-    "git":       "git --version",
+    "az":                    "az version",
+    "kubectl":               "kubectl version --client",
+    "kubelogin":             "kubelogin --version",
+    "helm":                  "helm version",
+    "argocd":                "argocd version --client",
+    "kustomize":             "kustomize version",
+    "terraform":             "terraform --version",
+    "gh":                    "gh --version",
+    "git":                   "git --version",
+    "kubectl-argo-rollouts": "kubectl-argo-rollouts version",
 }
 
 
