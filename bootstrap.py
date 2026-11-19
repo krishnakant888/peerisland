@@ -308,40 +308,51 @@ def _install_win(tool: str) -> bool:
             log("OK", f"argocd {v} → {_TOOLS_DIR}")
 
         elif tool == "kustomize":
-            # Get the actual asset download URL from GitHub API (avoids URL construction errors)
+            # kustomize mono-repo has many sub-module releases; page through until we find
+            # a kustomize/vX.Y.Z release that has a windows_amd64 .tar.gz asset.
             asset_url = ""
-            v = "unknown"
-            try:
-                req = urllib.request.Request(
-                    "https://api.github.com/repos/kubernetes-sigs/kustomize/releases?per_page=30",
-                    headers={"Accept": "application/vnd.github+json"},
-                )
-                with urllib.request.urlopen(req, timeout=15) as r:
-                    rels = json.loads(r.read())
-                for rel in rels:
-                    if not rel["tag_name"].startswith("kustomize/"):
-                        continue
-                    for asset in rel.get("assets", []):
-                        if "windows_amd64" in asset["name"] and asset["name"].endswith(".tar.gz"):
-                            asset_url = asset["browser_download_url"]
-                            v = rel["tag_name"].replace("kustomize/", "")
-                            break
-                    if asset_url:
+            v = ""
+            for page in range(1, 6):
+                try:
+                    req = urllib.request.Request(
+                        f"https://api.github.com/repos/kubernetes-sigs/kustomize/releases"
+                        f"?per_page=30&page={page}",
+                        headers={"Accept": "application/vnd.github+json", "User-Agent": "bootstrap.py"},
+                    )
+                    with urllib.request.urlopen(req, timeout=15) as r:
+                        rels = json.loads(r.read())
+                    if not rels:
                         break
-            except Exception as api_err:
-                log("WARN", f"GitHub API error: {api_err} — falling back to hardcoded version")
+                    for rel in rels:
+                        if not rel["tag_name"].startswith("kustomize/"):
+                            continue
+                        for asset in rel.get("assets", []):
+                            if "windows_amd64" in asset["name"] and asset["name"].endswith(".tar.gz"):
+                                asset_url = asset["browser_download_url"]
+                                v = rel["tag_name"].replace("kustomize/", "")
+                                break
+                        if asset_url:
+                            break
+                except Exception as api_err:
+                    log("WARN", f"GitHub API page {page}: {api_err}")
+                if asset_url:
+                    break
 
             if not asset_url:
-                v = _VERSIONS["kustomize"]
+                # Known-good fallback: v5.4.1 has verified Windows assets
+                v = "v5.4.1"
                 asset_url = (
                     f"https://github.com/kubernetes-sigs/kustomize/releases/download/"
                     f"kustomize%2F{v}/kustomize_{v}_windows_amd64.tar.gz"
                 )
+                log("WARN", f"API gave no asset URL — using fallback {v}")
+            else:
+                log("INFO", f"Found kustomize {v} via GitHub API")
+
             with tempfile.TemporaryDirectory() as tmp:
                 tgz = Path(tmp) / "kustomize.tar.gz"
                 _fetch(asset_url, tgz)
                 with tarfile.open(tgz) as tf:
-                    # The exe may be just "kustomize.exe" or bare "kustomize"
                     names = tf.getnames()
                     exe = next((n for n in names if "kustomize" in n.lower()), names[0])
                     tf.extract(exe, _TOOLS_DIR)
