@@ -30,7 +30,12 @@ variable "node_pool_min_count" {
 
 variable "user_node_pool_min_count" {
   type    = number
-  default = 0
+  default = 1
+}
+
+variable "user_node_pool_max_count" {
+  type    = number
+  default = 1
 }
 
 variable "node_pool_max_count" {
