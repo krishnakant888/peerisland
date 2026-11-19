@@ -12,15 +12,20 @@ controller:
     extra:
       - name: tmp
         emptyDir: {}
+      - name: alloy-data
+        emptyDir: {}
   podLabels:
     platform.io/api-access: "true"   # NetworkPolicy allows API server + kubelet egress
 
 alloy:
   stabilityLevel: generally-available
+  storagePath: /var/lib/alloy
   mounts:
     extra:
       - name: tmp
         mountPath: /tmp
+      - name: alloy-data
+        mountPath: /var/lib/alloy
   extraPorts:
     - name: otlp-grpc
       port: 4317

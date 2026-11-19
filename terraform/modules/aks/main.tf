@@ -25,6 +25,7 @@ resource "azurerm_kubernetes_cluster" "main" {
     auto_scaling_enabled = true
     min_count            = var.node_pool_min_count
     max_count            = var.node_pool_max_count
+    max_pods             = 110
     vnet_subnet_id       = var.node_subnet_id
     type                 = "VirtualMachineScaleSets"
     os_disk_size_gb      = 128
@@ -88,6 +89,7 @@ resource "azurerm_kubernetes_cluster_node_pool" "user" {
   auto_scaling_enabled  = true
   min_count             = var.user_node_pool_min_count
   max_count             = var.user_node_pool_max_count
+  max_pods              = 110
   vnet_subnet_id        = var.node_subnet_id
   os_disk_type          = "Managed"
   os_disk_size_gb       = 128
