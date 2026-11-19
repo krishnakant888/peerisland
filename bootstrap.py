@@ -1935,8 +1935,31 @@ def _refresh_github_secrets(state: dict, org: str, repo_name: str):
             creds[0] if creds else None,
         )
         if not main_cred:
-            log("WARN", "No federated credential on app — Terraform may not have applied yet")
-            return
+            log("WARN", "No federated credential on app — re-applying Terraform target to recreate it …")
+            tf_dir = REPO_ROOT / "terraform"
+            rc, _ = _tf_stream(
+                "terraform apply "
+                "-target=azuread_application_federated_identity_credential.github_main "
+                "-auto-approve",
+                str(tf_dir),
+            )
+            if rc != 0:
+                log("WARN", "Targeted terraform apply failed — OIDC credential still missing")
+                return
+            # Re-fetch after apply
+            creds_raw = capture(
+                f"az ad app federated-credential list --id {app_obj_id} -o json",
+                check=False,
+            )
+            creds = json.loads(creds_raw) if creds_raw.strip().startswith("[") else []
+            main_cred = next(
+                (c for c in creds if "main" in c.get("subject", "").lower()),
+                creds[0] if creds else None,
+            )
+            if not main_cred:
+                log("WARN", "Federated credential still missing after terraform apply")
+                return
+            log("OK", "Federated credential recreated by Terraform")
 
         current_subject = main_cred.get("subject", "")
         if current_subject == correct_subject:
