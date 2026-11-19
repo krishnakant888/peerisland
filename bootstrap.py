@@ -1835,34 +1835,43 @@ def _oidc_tf_apply():
     else:
         log("OK", "  terraform apply succeeded")
 
-    # Verify the service principal was actually created.
-    # Terraform can silently skip SP creation when the app was just created
-    # (Azure AD replication lag) — detect and create it here.
+    # Verify the SP was actually created.
+    # Azure AD needs time to propagate a new application before the SP can be
+    # created against it — Terraform's first apply may silently skip the SP.
+    # Retry the apply (up to 3×, waiting 30 s between) so Terraform creates it.
     client_id, _ = _tf_cicd_app_ids()
     if not client_id:
         log("WARN", "  No client_id after apply — cannot verify SP")
         return
 
-    log("INFO", f"  Checking SP for app {client_id[:8]}… …")
-    sp_check = subprocess.run(
-        f"az ad sp show --id {client_id} --query appId -o tsv",
-        shell=True, capture_output=True, text=True,
-    )
-    if sp_check.returncode == 0 and sp_check.stdout.strip():
-        log("OK", f"  Service principal exists for {client_id[:8]}…")
-        return
+    for attempt in range(1, 4):
+        sp_check = subprocess.run(
+            f"az ad sp show --id {client_id} --query appId -o tsv",
+            shell=True, capture_output=True, text=True,
+        )
+        if sp_check.returncode == 0 and sp_check.stdout.strip():
+            log("OK", f"  Service principal exists for {client_id[:8]}…")
+            return
 
-    log("WARN", f"  SP missing for {client_id[:8]}… — creating via az ad sp create …")
-    sp_create = subprocess.run(
-        f"az ad sp create --id {client_id}",
-        shell=True, capture_output=True, text=True,
-    )
-    if sp_create.returncode == 0:
-        log("OK", "  Service principal created")
-        log("INFO", "  Waiting 30s for Azure AD SP propagation …")
-        time.sleep(30)
-    else:
-        log("WARN", f"  az ad sp create failed: {(sp_create.stderr or sp_create.stdout)[:200]}")
+        if attempt < 3:
+            log("WARN",
+                f"  SP not yet visible (attempt {attempt}/3) — "
+                f"waiting 30 s for Azure AD propagation then retrying terraform apply …")
+            time.sleep(30)
+            rc2, out2 = _tf_stream(
+                "terraform apply "
+                "-target=azuread_application.cicd "
+                "-target=azuread_service_principal.cicd "
+                "-target=azuread_application_federated_identity_credential.github_main "
+                "-auto-approve",
+                str(tf_dir),
+            )
+            if rc2 != 0:
+                log("WARN", f"  retry apply failed (exit {rc2}): {out2[-200:]}")
+
+    log("WARN",
+        f"  SP still missing for {client_id[:8]}… after 3 terraform apply attempts.\n"
+        f"  Run 'terraform apply' manually in terraform/ to let Terraform create it.")
 
 
 def _refresh_github_secrets(state: dict, org: str, repo_name: str):
