@@ -35,12 +35,9 @@ resource "azurerm_kubernetes_cluster" "main" {
       "environment"   = "production"
     }
 
-    # Prevent user workloads from landing on the system node pool.
-    # Only pods that explicitly tolerate CriticalAddonsOnly (kube-system
-    # DaemonSets, konnectivity, etc.) will be scheduled here.
-    # Without this taint the scheduler splits ArgoCD components across pools
-    # causing i/o timeout on cross-node gRPC calls (app-controller ↔ repo-server).
-    node_taints = ["CriticalAddonsOnly=true:NoSchedule"]
+    # node_taints = ["CriticalAddonsOnly=true:NoSchedule"] was set at cluster
+    # creation and exists on the live pool. azurerm 4.x removed this argument
+    # from default_node_pool; the taint persists unmanaged by Terraform.
 
     upgrade_settings {
       max_surge = "10%"
