@@ -1,5 +1,8 @@
 replicas: 1
 
+nodeSelector:
+  kubernetes.azure.com/mode: user
+
 admin:
   existingSecret: grafana-admin-secret
   userKey: admin-user

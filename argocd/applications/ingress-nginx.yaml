@@ -18,6 +18,12 @@ spec:
       values: |
         controller:
           replicaCount: 1
+          nodeSelector:
+            kubernetes.azure.com/mode: system
+          tolerations:
+            - key: CriticalAddonsOnly
+              operator: Exists
+              effect: NoSchedule
           resources:
             requests:
               cpu: 100m

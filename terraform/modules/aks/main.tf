@@ -21,7 +21,7 @@ resource "azurerm_kubernetes_cluster" "main" {
 
   default_node_pool {
     name                = "system"
-    vm_size             = var.node_pool_vm_size
+    vm_size             = var.system_node_pool_vm_size
     auto_scaling_enabled = true
     min_count            = var.node_pool_min_count
     max_count            = var.node_pool_max_count
@@ -34,6 +34,13 @@ resource "azurerm_kubernetes_cluster" "main" {
       "nodepool-type" = "system"
       "environment"   = "production"
     }
+
+    # Prevent user workloads from landing on the system node pool.
+    # Only pods that explicitly tolerate CriticalAddonsOnly (kube-system
+    # DaemonSets, konnectivity, etc.) will be scheduled here.
+    # Without this taint the scheduler splits ArgoCD components across pools
+    # causing i/o timeout on cross-node gRPC calls (app-controller ↔ repo-server).
+    node_taints = ["CriticalAddonsOnly=true:NoSchedule"]
 
     upgrade_settings {
       max_surge = "10%"

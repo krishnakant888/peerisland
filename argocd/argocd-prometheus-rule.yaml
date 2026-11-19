@@ -1,0 +1,181 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: argocd-alerts
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/part-of: mimir
+spec:
+  groups:
+
+    # ── Sync / Health ────────────────────────────────────────────────────────
+    - name: argocd.sync
+      interval: 1m
+      rules:
+
+        - alert: ArgoCDAppOutOfSync
+          expr: |
+            argocd_app_info{sync_status="OutOfSync"} == 1
+          for: 10m
+          labels:
+            severity: warning
+            team: platform
+          annotations:
+            summary: "ArgoCD app {{ $labels.name }} is OutOfSync"
+            description: "App {{ $labels.name }} has been OutOfSync for >10 min. Check ArgoCD UI or run argocd app sync {{ $labels.name }}."
+
+        - alert: ArgoCDAppUnhealthy
+          expr: |
+            argocd_app_info{health_status!~"Healthy|Progressing"} == 1
+          for: 15m
+          labels:
+            severity: warning
+            team: platform
+          annotations:
+            summary: "ArgoCD app {{ $labels.name }} is {{ $labels.health_status }}"
+            description: "App {{ $labels.name }} health={{ $labels.health_status }} for >15 min. Check pods in its namespace."
+
+        - alert: ArgoCDAppSyncFailed
+          expr: |
+            argocd_app_info{operation_phase=~"Error|Failed"} == 1
+          for: 5m
+          labels:
+            severity: critical
+            team: platform
+          annotations:
+            summary: "ArgoCD app {{ $labels.name }} sync failed"
+            description: "App {{ $labels.name }} last sync phase={{ $labels.operation_phase }}. Check ArgoCD for the error message."
+
+    # ── RPC / Manifest generation ─────────────────────────────────────────────
+    # Lesson: repo-server restarts (OOM) cause stale gRPC connections →
+    # all or specific apps show "rpc error: code = Unavailable/Unknown".
+    - name: argocd.rpc
+      interval: 30s
+      rules:
+
+        - alert: ArgoCDGlobalRPCError
+          expr: |
+            (
+              count(argocd_app_info{health_status="Unknown"})
+              /
+              count(argocd_app_info)
+            ) > 0.4
+          for: 2m
+          labels:
+            severity: critical
+            team: platform
+          annotations:
+            summary: "ArgoCD global rpc error — >40% of apps Unknown"
+            description: |
+              {{ $value | humanizePercentage }} of apps are Unknown, indicating stale gRPC
+              connections after a repo-server restart. Fix: restart argocd-application-controller.
+              kubectl rollout restart statefulset argocd-application-controller -n argocd
+
+        - alert: ArgoCDManifestGenerationError
+          expr: |
+            argocd_app_info{condition_type="ComparisonError"} == 1
+              or
+            argocd_app_info{sync_status="Unknown"} == 1
+          for: 5m
+          labels:
+            severity: warning
+            team: platform
+          annotations:
+            summary: "ArgoCD app {{ $labels.name }} manifest generation failing"
+            description: |
+              App {{ $labels.name }} cannot generate manifests. Common causes:
+              1. kustomize path traversal (fix: add kustomize.buildOptions: --load-restrictor LoadRestrictionsNone to argocd-cm)
+              2. repo-server rpc error (fix: hard-refresh the app)
+              3. Git fetch timeout
+
+    # ── Repo Server ───────────────────────────────────────────────────────────
+    # Lesson: repo-server OOMKills under first-deploy load caused global rpc error.
+    - name: argocd.reposerver
+      interval: 1m
+      rules:
+
+        - alert: ArgoCDRepoServerOOMKilled
+          expr: |
+            increase(kube_pod_container_status_restarts_total{
+              namespace="argocd", container="argocd-repo-server"
+            }[30m]) > 1
+          for: 0m
+          labels:
+            severity: critical
+            team: platform
+          annotations:
+            summary: "ArgoCD repo-server restarted {{ $value | humanize }} times in 30 min"
+            description: |
+              Repo-server is restarting — likely OOMKilled. This triggers global rpc errors.
+              Check: kubectl describe pod -n argocd -l app.kubernetes.io/name=argocd-repo-server
+              Fix: increase repoServer.resources.limits.memory in argocd-values.yaml.
+
+        - alert: ArgoCDRepoServerHighMemory
+          expr: |
+            container_memory_working_set_bytes{
+              namespace="argocd", container="argocd-repo-server"
+            } > 450 * 1024 * 1024
+          for: 5m
+          labels:
+            severity: warning
+            team: platform
+          annotations:
+            summary: "ArgoCD repo-server memory >450Mi on pod {{ $labels.pod }}"
+            description: "Memory is {{ $value | humanize1024 }}. Limit is 512Mi — close to OOM. Consider raising the limit."
+
+        - alert: ArgoCDRepoServerHighCPU
+          expr: |
+            rate(container_cpu_usage_seconds_total{
+              namespace="argocd", container="argocd-repo-server"
+            }[5m]) > 0.8
+          for: 10m
+          labels:
+            severity: warning
+            team: platform
+          annotations:
+            summary: "ArgoCD repo-server CPU >80% on {{ $labels.pod }}"
+            description: "CPU {{ $value | humanize }} cores. High CPU during large syncs can cause manifest timeouts."
+
+    # ── Application Controller ────────────────────────────────────────────────
+    - name: argocd.controller
+      interval: 1m
+      rules:
+
+        - alert: ArgoCDControllerOOMKilled
+          expr: |
+            increase(kube_pod_container_status_restarts_total{
+              namespace="argocd", container="argocd-application-controller"
+            }[30m]) > 0
+          for: 0m
+          labels:
+            severity: critical
+            team: platform
+          annotations:
+            summary: "ArgoCD application-controller restarted"
+            description: |
+              The application-controller restarted. All app reconciliation pauses until it recovers.
+              Check: kubectl describe pod -n argocd -l app.kubernetes.io/name=argocd-application-controller
+
+        - alert: ArgoCDControllerHighMemory
+          expr: |
+            container_memory_working_set_bytes{
+              namespace="argocd", container="argocd-application-controller"
+            } > 850 * 1024 * 1024
+          for: 5m
+          labels:
+            severity: warning
+            team: platform
+          annotations:
+            summary: "ArgoCD application-controller memory >850Mi"
+            description: "Memory is {{ $value | humanize1024 }}. Limit is 1Gi — approaching OOM."
+
+        - alert: ArgoCDReconciliationQueueHigh
+          expr: |
+            argocd_app_reconcile_bucket{le="10"} / ignoring(le) argocd_app_reconcile_count < 0.5
+          for: 10m
+          labels:
+            severity: warning
+            team: platform
+          annotations:
+            summary: "ArgoCD reconciliation slow — <50% completing within 10s"
+            description: "Controller is under heavy load. Consider increasing controller resources or reducing sync interval."

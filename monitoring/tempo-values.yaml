@@ -49,6 +49,9 @@ tempo:
         enabled: true
         dimensions: [service.name, http.route, http.status_code]
 
+nodeSelector:
+  kubernetes.azure.com/mode: user
+
 persistence:
   enabled: true
   size: 10Gi

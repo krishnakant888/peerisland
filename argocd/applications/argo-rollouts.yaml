@@ -18,6 +18,9 @@ spec:
       values: |
         controller:
           replicas: 1
+          nodeSelector:
+            kubernetes.azure.com/mode: user
+          tolerations: []
           resources:
             requests:
               cpu: 100m

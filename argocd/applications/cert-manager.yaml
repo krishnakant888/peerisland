@@ -18,6 +18,12 @@ spec:
       values: |
         installCRDs: true
         replicaCount: 1
+        nodeSelector:
+          kubernetes.azure.com/mode: system
+        tolerations:
+          - key: CriticalAddonsOnly
+            operator: Exists
+            effect: NoSchedule
         resources:
           requests:
             cpu: 50m
@@ -26,11 +32,23 @@ spec:
             cpu: 200m
             memory: 128Mi
         webhook:
+          nodeSelector:
+            kubernetes.azure.com/mode: system
+          tolerations:
+            - key: CriticalAddonsOnly
+              operator: Exists
+              effect: NoSchedule
           resources:
             requests:
               cpu: 20m
               memory: 32Mi
         cainjector:
+          nodeSelector:
+            kubernetes.azure.com/mode: system
+          tolerations:
+            - key: CriticalAddonsOnly
+              operator: Exists
+              effect: NoSchedule
           resources:
             requests:
               cpu: 20m
@@ -47,3 +65,4 @@ spec:
     syncOptions:
       - CreateNamespace=true
       - SkipDryRunOnMissingResource=true
+      - ServerSideApply=true

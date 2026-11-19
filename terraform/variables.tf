@@ -27,8 +27,14 @@ variable "kubernetes_version" {
   default     = "1.37.1"
 }
 
+variable "system_node_pool_vm_size" {
+  description = "VM size for the system node pool — only kube-system DaemonSets run here, so a 2-vCPU SKU is sufficient"
+  type        = string
+  default     = "Standard_D2s_v3"
+}
+
 variable "node_pool_vm_size" {
-  description = "VM size for node pools. Standard_D4s_v3 (4 vCPU/16GB) is the minimum for LGTM stack + app pods"
+  description = "VM size for user node pools — runs all application workloads. Standard_D4s_v5 (4 vCPU/16GB) is the minimum for LGTM stack + app pods"
   type        = string
   default     = "Standard_D4s_v5"
 }

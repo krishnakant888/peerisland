@@ -23,6 +23,8 @@ loki:
 
 singleBinary:
   replicas: 1
+  nodeSelector:
+    kubernetes.azure.com/mode: user
   persistence:
     enabled: true
     size: 30Gi

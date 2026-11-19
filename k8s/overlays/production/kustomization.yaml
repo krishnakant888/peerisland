@@ -3,7 +3,7 @@ kind: Kustomization
 
 # Point to the shared base manifests
 resources:
-- ../../
+- ../../base/
 
 # ArgoCD / CI updates these image tags via:
 #   kustomize edit set image PLACEHOLDER_ACR/backend=<acr>/<repo>:<sha>

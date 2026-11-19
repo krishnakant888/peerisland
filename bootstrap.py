@@ -2487,7 +2487,9 @@ def _ensure_argocd_resources_patched():
     Apply (or re-apply) argocd-values.yaml via helm upgrade so that resource
     limits, repo-server replicas=2, and --repo-server-timeout-seconds are live.
     Idempotent — helm upgrade --install is a no-op when nothing changed.
-    Called once when a global rpc error is first detected.
+
+    Also explicitly patches argocd-cm with kustomize.buildOptions because
+    helm does not reliably update an already-existing argocd-cm ConfigMap.
     """
     argocd_values = REPO_ROOT / "argocd" / "argocd-values.yaml"
     if not argocd_values.exists():
@@ -2506,6 +2508,23 @@ def _ensure_argocd_resources_patched():
         log("OK", "ArgoCD Helm values applied — resource limits and repo-server replicas=2 are now live")
     else:
         log("WARN", f"helm upgrade returned non-zero: {r.stderr.strip()[:200]}")
+
+    # Helm does not reliably write configs.cm keys into an already-existing argocd-cm.
+    # Patch explicitly so kustomize ../../ path traversal works for the peerisland overlay.
+    r2 = subprocess.run(
+        "kubectl get cm argocd-cm -n argocd -o jsonpath={.data.kustomize\\.buildOptions}",
+        shell=True, capture_output=True, text=True,
+    )
+    if "--load-restrictor" not in r2.stdout:
+        log("INFO", "argocd-cm missing kustomize.buildOptions — patching directly …")
+        subprocess.run(
+            "kubectl patch configmap argocd-cm -n argocd --type merge "
+            "-p '{\"data\":{\"kustomize.buildOptions\":\"--load-restrictor LoadRestrictionsNone\"}}'",
+            shell=True, check=True,
+        )
+        log("OK", "argocd-cm patched: kustomize.buildOptions=--load-restrictor LoadRestrictionsNone")
+    else:
+        log("OK", "argocd-cm kustomize.buildOptions already set — no patch needed")
 
 
 _argocd_resources_patched = False
@@ -2771,30 +2790,33 @@ def phase10_rollouts(state: dict):
             except Exception:
                 return {}
 
-        def _fix_peerisland_rpc():
-            st = _peerisland_app_status()
-            conds = st.get("conditions", [])
-            msgs = " ".join(c.get("message", "") for c in conds).lower()
-            if "rpc" in msgs or "failed to generate manifest" in msgs:
-                log("WARN", "  peerisland app has rpc error — restarting app-controller and hard-refreshing …")
-                subprocess.run(
-                    "kubectl rollout restart statefulset argocd-application-controller -n argocd",
-                    shell=True, capture_output=True,
-                )
-                subprocess.run(
-                    "kubectl rollout status statefulset argocd-application-controller -n argocd --timeout=120s",
-                    shell=True,
-                )
-                subprocess.run(
-                    "kubectl annotate application peerisland -n argocd "
-                    "argocd.argoproj.io/refresh=hard --overwrite",
-                    shell=True, capture_output=True,
-                )
-                time.sleep(10)
-                return True
-            return False
+        # Hard-refresh first — clears any cached error state without a restart
+        log("INFO", "  hard-refreshing peerisland app …")
+        subprocess.run(
+            "kubectl annotate application peerisland -n argocd "
+            "argocd.argoproj.io/refresh=hard --overwrite",
+            shell=True, capture_output=True,
+        )
+        time.sleep(15)  # give repo-server time to attempt the build
 
-        _fix_peerisland_rpc()
+        # Only restart app-controller if rpc error persists after the refresh
+        st = _peerisland_app_status()
+        conds = st.get("conditions", [])
+        msgs = " ".join(c.get("message", "") for c in conds).lower()
+        _controller_restarted_at = 0.0
+        if "rpc" in msgs or "failed to generate manifest" in msgs:
+            log("WARN", "  rpc error persists — restarting app-controller once …")
+            subprocess.run(
+                "kubectl rollout restart statefulset argocd-application-controller -n argocd",
+                shell=True, capture_output=True,
+            )
+            subprocess.run(
+                "kubectl rollout status statefulset argocd-application-controller -n argocd --timeout=120s",
+                shell=True,
+            )
+            _controller_restarted_at = time.time()
+            log("INFO", "  waiting 45s for controller to reconnect before syncing …")
+            time.sleep(45)
 
         log("INFO", "Triggering ArgoCD sync for peerisland app …")
         subprocess.run(
@@ -2802,9 +2824,9 @@ def phase10_rollouts(state: dict):
             shell=True, capture_output=True,
         )
 
-        log("INFO", "Waiting for 'peerisland' namespace to appear (up to 5 min) …")
-        deadline_ns = time.time() + 300
-        last_fix_t = time.time()
+        log("INFO", "Waiting for 'peerisland' namespace to appear (up to 8 min) …")
+        deadline_ns = time.time() + 480
+        last_refresh_t = time.time()
         while time.time() < deadline_ns:
             r = subprocess.run(
                 "kubectl get namespace peerisland",
@@ -2813,16 +2835,39 @@ def phase10_rollouts(state: dict):
             if r.returncode == 0:
                 log("OK", "namespace 'peerisland' exists — continuing")
                 break
-            # Re-check for rpc error every 60s and fix if needed
-            if time.time() - last_fix_t >= 60:
-                if _fix_peerisland_rpc():
-                    subprocess.run("argocd app sync peerisland --force --async",
-                                   shell=True, capture_output=True)
-                last_fix_t = time.time()
+            # Every 90s: hard-refresh only (no more controller restarts — they cause loops)
+            if time.time() - last_refresh_t >= 90:
+                st2 = _peerisland_app_status()
+                sync2 = st2.get("sync", {}).get("status", "")
+                msgs2 = " ".join(c.get("message", "") for c in st2.get("conditions", [])).lower()
+                if "rpc" in msgs2 or "failed to generate manifest" in msgs2:
+                    # Only restart controller again if 5+ min since last restart
+                    if time.time() - _controller_restarted_at >= 300:
+                        log("WARN", "  rpc error returned — restarting controller (5 min cooldown respected) …")
+                        subprocess.run(
+                            "kubectl rollout restart statefulset argocd-application-controller -n argocd",
+                            shell=True, capture_output=True,
+                        )
+                        subprocess.run(
+                            "kubectl rollout status statefulset argocd-application-controller -n argocd --timeout=120s",
+                            shell=True,
+                        )
+                        _controller_restarted_at = time.time()
+                        time.sleep(45)
+                    else:
+                        log("INFO", "  rpc error seen but cooldown active — hard-refreshing only …")
+                        subprocess.run(
+                            "kubectl annotate application peerisland -n argocd "
+                            "argocd.argoproj.io/refresh=hard --overwrite",
+                            shell=True, capture_output=True,
+                        )
+                subprocess.run("argocd app sync peerisland --force --async",
+                               shell=True, capture_output=True)
+                last_refresh_t = time.time()
             log("INFO", f"  namespace not yet present — waiting … ({int(deadline_ns - time.time())}s left)")
             time.sleep(15)
         else:
-            die("namespace 'peerisland' did not appear within 5 min — "
+            die("namespace 'peerisland' did not appear within 8 min — "
                 "check ArgoCD app 'peerisland' for sync errors (python bootstrap.py --diagnose)")
 
     def _watch_rollout(svc: str, target_phase: str, timeout: int) -> dict:
@@ -2981,15 +3026,28 @@ def _ensure_kubectl_auth(state: dict):
     """
     _ensure_tools_on_path()
 
-    # Install kubelogin if it's missing from the tools dir
+    # Ensure kubelogin lives in _TOOLS_DIR so any terminal with _TOOLS_DIR on
+    # PATH can authenticate — not just the bootstrap.py process.
     kl_exe = "kubelogin.exe" if _IS_WIN else "kubelogin"
-    if not any(
-        (Path(p) / kl_exe).exists()
-        for p in os.environ.get("PATH", "").split(os.pathsep)
-    ):
-        log("INFO", "kubelogin not found — installing …")
-        _ensure_tool("kubelogin")
-        _ensure_tools_on_path()
+    kl_in_tools = (_TOOLS_DIR / kl_exe).exists()
+    if not kl_in_tools:
+        # Check if it exists elsewhere (e.g. ~/.azure-kubelogin from az aks install-cli)
+        elsewhere = next(
+            (Path(p) / kl_exe
+             for p in os.environ.get("PATH", "").split(os.pathsep)
+             if (Path(p) / kl_exe).exists()),
+            None,
+        )
+        if elsewhere:
+            # Copy into _TOOLS_DIR so it's in the canonical location
+            import shutil
+            _TOOLS_DIR.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(str(elsewhere), str(_TOOLS_DIR / kl_exe))
+            log("OK", f"kubelogin copied to tools dir from {elsewhere.parent}")
+        else:
+            log("INFO", "kubelogin not found — installing …")
+            _auto_install("kubelogin")
+            _ensure_tools_on_path()
     else:
         log("OK", "kubelogin found in PATH")
 

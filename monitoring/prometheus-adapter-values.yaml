@@ -5,6 +5,9 @@
 #            prometheus-community/prometheus-adapter \
 #            -n monitoring -f monitoring/prometheus-adapter-values.yaml
 
+nodeSelector:
+  kubernetes.azure.com/mode: user
+
 prometheus:
   url: http://mimir.monitoring.svc.cluster.local
   port: 8080
