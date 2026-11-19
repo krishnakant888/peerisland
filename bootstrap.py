@@ -806,6 +806,45 @@ def phase2_bootstrap_tfstate(state: dict):
 #  PHASE 3 — Set GitHub Actions secrets
 # ═════════════════════════════════════════════════════════════════════════════
 
+def _tf_cicd_app_ids() -> tuple:
+    """Return (client_id, object_id) for azuread_application.cicd from Terraform state/output.
+
+    Uses `terraform output` first (fastest), falls back to `terraform state show`.
+    Returns ('', '') if Terraform hasn't applied yet.
+    """
+    tf_dir = REPO_ROOT / "terraform"
+    # Try outputs first
+    out_raw = capture("terraform output -json", cwd=tf_dir, check=False)
+    if out_raw.strip().startswith("{"):
+        try:
+            outs = json.loads(out_raw)
+            cid = outs.get("cicd_client_id", {}).get("value", "")
+            if cid:
+                # object_id not in outputs — read from state
+                st = capture("terraform state show azuread_application.cicd",
+                             cwd=tf_dir, check=False)
+                oid = ""
+                for line in st.splitlines():
+                    s = line.strip()
+                    if s.startswith("object_id") and "=" in s:
+                        oid = s.split("=", 1)[-1].strip().strip('"')
+                        break
+                return cid, oid
+        except Exception:
+            pass
+    # Fall back to state show
+    st = capture("terraform state show azuread_application.cicd",
+                 cwd=tf_dir, check=False)
+    cid = oid = ""
+    for line in st.splitlines():
+        s = line.strip()
+        if s.startswith("client_id") and "=" in s and not cid:
+            cid = s.split("=", 1)[-1].strip().strip('"')
+        if s.startswith("object_id") and "=" in s and not oid:
+            oid = s.split("=", 1)[-1].strip().strip('"')
+    return cid, oid
+
+
 def phase3_github_secrets(state: dict):
     phase_header(3, "Set GitHub Actions secrets")
     org       = state["data"].get("github_org",  "")
@@ -823,18 +862,8 @@ def phase3_github_secrets(state: dict):
     def tf(key: str) -> str:
         return tf_outs.get(key, {}).get("value", "") or ""
 
-    client_id = tf("cicd_client_id")
-    if not client_id:
-        # Terraform hasn't run yet — read from state if available
-        # (avoid az ad app list which picks an arbitrary orphan when multiple exist)
-        tf_state_raw = capture(
-            "terraform state show azuread_application.cicd",
-            cwd=tf_dir, check=False,
-        )
-        for line in tf_state_raw.splitlines():
-            if "client_id" in line and "=" in line:
-                client_id = line.split("=")[-1].strip().strip('"')
-                break
+    client_id, _ = _tf_cicd_app_ids()
+    client_id = client_id or tf("cicd_client_id")
 
     tenant_id_val = tf("cicd_tenant_id") or tid
     sub_id_val    = tf("cicd_subscription_id") or sub
@@ -1798,19 +1827,8 @@ def _refresh_github_secrets(state: dict, org: str, repo_name: str):
     def tf(key: str) -> str:
         return tf_outs.get(key, {}).get("value", "") or ""
 
-    # Use terraform output as the authoritative source — az ad app list returns
-    # the first of potentially multiple orphan apps with the same display name.
-    client_id  = tf("cicd_client_id")
-    if not client_id:
-        # Fallback: get appId by matching the object ID that Terraform state knows
-        tf_state_raw = capture(
-            "terraform state show azuread_application.cicd",
-            cwd=tf_dir, check=False,
-        )
-        for line in tf_state_raw.splitlines():
-            if "client_id" in line and "=" in line:
-                client_id = line.split("=")[-1].strip().strip('"')
-                break
+    client_id, _app_obj_id_cache = _tf_cicd_app_ids()
+    client_id = client_id or tf("cicd_client_id")
     tenant_id  = tf("cicd_tenant_id")  or state["data"].get("tenant_id", "")
     sub_id     = tf("cicd_subscription_id") or state["data"].get("subscription_id", "")
     acr_name   = state["data"].get("acr_name",          "peerislandprodacr")
@@ -1855,17 +1873,7 @@ def _refresh_github_secrets(state: dict, org: str, repo_name: str):
     # Delete all orphans so only the Terraform-managed app remains.
     log("INFO", "Checking for orphan Azure AD apps …")
     try:
-        # Get the object ID of the Terraform-managed app from state
-        tf_state_raw = capture(
-            "terraform state show azuread_application.cicd",
-            cwd=tf_dir, check=False,
-        )
-        tf_obj_id = ""
-        for line in tf_state_raw.splitlines():
-            stripped = line.strip()
-            if stripped.startswith("id") and "=" in stripped and len(stripped.split("=")[-1].strip().strip('"')) == 36:
-                tf_obj_id = stripped.split("=")[-1].strip().strip('"')
-                break
+        _, tf_obj_id = _tf_cicd_app_ids()
 
         # List all apps with the same display name
         all_apps_raw = capture(
@@ -1912,16 +1920,7 @@ def _refresh_github_secrets(state: dict, org: str, repo_name: str):
         correct_subject = f"repo:{org}@{user_id}/{repo_name}@{repo_id}:ref:refs/heads/main"
 
         # Use terraform state for the authoritative object ID (not az ad app list)
-        tf_state_raw = capture(
-            "terraform state show azuread_application.cicd",
-            cwd=tf_dir, check=False,
-        )
-        app_obj_id = ""
-        for line in tf_state_raw.splitlines():
-            stripped = line.strip()
-            if stripped.startswith("id") and "=" in stripped and len(stripped.split("=")[-1].strip().strip('"')) == 36:
-                app_obj_id = stripped.split("=")[-1].strip().strip('"')
-                break
+        _, app_obj_id = _tf_cicd_app_ids()
         if not app_obj_id:
             log("WARN", "Could not read app object ID from Terraform state — skipping OIDC fix")
             return
