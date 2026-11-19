@@ -65,17 +65,20 @@ spec:
         - /status/terminatingReplicas
     - group: admissionregistration.k8s.io
       kind: ValidatingWebhookConfiguration
-      jqPathExpressions:
-        - .webhooks[]?.clientConfig.caBundle
+      jsonPointers:
+        - /webhooks/0/clientConfig/caBundle
+        - /webhooks/1/clientConfig/caBundle
+        - /webhooks/2/clientConfig/caBundle
     - group: admissionregistration.k8s.io
       kind: MutatingWebhookConfiguration
-      jqPathExpressions:
-        - .webhooks[]?.clientConfig.caBundle
+      jsonPointers:
+        - /webhooks/0/clientConfig/caBundle
+        - /webhooks/1/clientConfig/caBundle
+        - /webhooks/2/clientConfig/caBundle
     - group: apiextensions.k8s.io
       kind: CustomResourceDefinition
-      jqPathExpressions:
-        - .spec.conversion.webhook.clientConfig.caBundle
-        - .spec.versions[]?.schema.openAPIV3Schema.properties.metadata
+      jsonPointers:
+        - /spec/conversion/webhook/clientConfig/caBundle
 
   syncPolicy:
     automated:
