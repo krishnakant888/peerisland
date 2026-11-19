@@ -1679,13 +1679,18 @@ def phase8_wait_argocd(state: dict):
         return {a["metadata"]["name"]: a.get("status", {}) for a in items}
 
     def _has_global_rpc_error(status: dict) -> bool:
-        """Return True if most apps share the same rpc error — signals a component issue."""
+        """Return True if most apps share a connection rpc error (Unavailable) — signals a component issue.
+        Does NOT count code=Unknown (build failures) since restarting the controller won't fix those."""
         rpc_count = 0
         for name in expected:
             s = status.get(name, {})
             for cond in s.get("conditions", []):
-                msg = cond.get("message", "")
-                if "rpc" in msg.lower() or "failed to generate manifest" in msg.lower():
+                msg = cond.get("message", "").lower()
+                is_conn_error = (
+                    "code = unavailable" in msg
+                    or ("rpc" in msg and "code = unknown" not in msg and "failed to generate manifest" not in msg)
+                )
+                if is_conn_error:
                     rpc_count += 1
                     break
         return rpc_count >= max(3, len(expected) // 2)
@@ -2556,11 +2561,17 @@ def _argocd_global_rpc_check_and_fix(wait_healthy: bool = True, timeout: int = 3
             return []
 
     def _rpc_count(items):
+        # Only count Unavailable (stale gRPC connection) — NOT Unknown (kustomize/helm build failure).
+        # Restarting app-controller fixes Unavailable; it does nothing for Unknown build errors.
         count = 0
         for a in items:
             for cond in a.get("status", {}).get("conditions", []):
                 msg = cond.get("message", "").lower()
-                if "rpc" in msg or "failed to generate manifest" in msg or "unavailable" in msg:
+                is_conn_error = (
+                    "code = unavailable" in msg
+                    or ("rpc" in msg and "code = unknown" not in msg and "failed to generate manifest" not in msg)
+                )
+                if is_conn_error:
                     count += 1
                     break
         return count
@@ -2799,12 +2810,16 @@ def phase10_rollouts(state: dict):
         )
         time.sleep(15)  # give repo-server time to attempt the build
 
-        # Only restart app-controller if rpc error persists after the refresh
+        # Only restart app-controller for connection errors (code=Unavailable).
+        # code=Unknown means kustomize/helm build failure — restart does nothing for that.
         st = _peerisland_app_status()
         conds = st.get("conditions", [])
         msgs = " ".join(c.get("message", "") for c in conds).lower()
         _controller_restarted_at = 0.0
-        if "rpc" in msgs or "failed to generate manifest" in msgs:
+        _is_conn_rpc = "code = unavailable" in msgs or (
+            "rpc" in msgs and "code = unknown" not in msgs and "failed to generate manifest" not in msgs
+        )
+        if _is_conn_rpc:
             log("WARN", "  rpc error persists — restarting app-controller once …")
             subprocess.run(
                 "kubectl rollout restart statefulset argocd-application-controller -n argocd",
@@ -2840,7 +2855,10 @@ def phase10_rollouts(state: dict):
                 st2 = _peerisland_app_status()
                 sync2 = st2.get("sync", {}).get("status", "")
                 msgs2 = " ".join(c.get("message", "") for c in st2.get("conditions", [])).lower()
-                if "rpc" in msgs2 or "failed to generate manifest" in msgs2:
+                _is_conn_rpc2 = "code = unavailable" in msgs2 or (
+                    "rpc" in msgs2 and "code = unknown" not in msgs2 and "failed to generate manifest" not in msgs2
+                )
+                if _is_conn_rpc2:
                     # Only restart controller again if 5+ min since last restart
                     if time.time() - _controller_restarted_at >= 300:
                         log("WARN", "  rpc error returned — restarting controller (5 min cooldown respected) …")
