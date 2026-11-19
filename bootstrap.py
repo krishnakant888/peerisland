@@ -413,6 +413,37 @@ def _auto_install(tool: str) -> bool:
     return _install_win(tool) if _IS_WIN else _install_linux(tool)
 
 
+_REQUIRED_PROVIDERS = [
+    "Microsoft.ContainerService",
+    "Microsoft.ContainerRegistry",
+    "Microsoft.KeyVault",
+    "Microsoft.Network",
+    "Microsoft.Compute",
+    "Microsoft.Storage",
+    "Microsoft.OperationalInsights",
+    "Microsoft.OperationsManagement",
+    "Microsoft.ManagedIdentity",
+    "Microsoft.Authorization",
+    "Microsoft.Resources",
+    "Microsoft.Insights",
+]
+
+
+def _register_azure_providers():
+    log("INFO", "Registering required Azure resource providers …")
+    for ns in _REQUIRED_PROVIDERS:
+        r = subprocess.run(
+            f"az provider show --namespace {ns} --query registrationState -o tsv",
+            shell=True, capture_output=True, text=True,
+        )
+        if r.stdout.strip() == "Registered":
+            log("OK", f"  {ns} already registered")
+            continue
+        log("INFO", f"  Registering {ns} …")
+        subprocess.run(f"az provider register --namespace {ns} --wait", shell=True, check=True)
+        log("OK", f"  {ns} registered")
+
+
 def phase1_preflight(state: dict):
     phase_header(1, "Pre-flight checks")
 
@@ -481,6 +512,9 @@ def phase1_preflight(state: dict):
         state["data"]["github_org"]  = parts[0]
         state["data"]["github_repo"] = parts[1]
         log("OK", f"GitHub repo: {parts[0]}/{parts[1]}")
+
+    # Register resource providers — required on new subscriptions
+    _register_azure_providers()
 
     _ensure_tfvars(state)
     mark_done(state, 1)
