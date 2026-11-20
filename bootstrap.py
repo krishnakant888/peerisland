@@ -1540,7 +1540,12 @@ def phase4_terraform(state: dict):
     else:
         log("INFO", "Auto-approved terraform apply (--yes)")
 
-    MAX_ATTEMPTS = 5
+    # Retry up to 10 times: each pass imports any "already exists" resources
+    # found and re-applies.  terraform apply -json collects ALL errors in one
+    # pass so typically converges in ≤2 attempts (import-all then apply-clean).
+    MAX_ATTEMPTS = 10
+    consecutive_no_progress = 0
+    prev_import_set: set[str] = set()
     for attempt in range(1, MAX_ATTEMPTS + 1):
         log("INFO", f"Applying infrastructure (attempt {attempt}/{MAX_ATTEMPTS}) …")
         try:
@@ -1550,16 +1555,20 @@ def phase4_terraform(state: dict):
                 imports = [(a, i) for a, i in to_import if a != "__patched__"]
                 if patched:
                     log("WARN", "HCL patched — retrying apply …")
-                    if attempt == MAX_ATTEMPTS:
-                        die("Terraform apply failed after max attempts — check errors above")
                     time.sleep(3)
                     continue
+                import_set = {a for a, _ in imports}
+                if import_set and import_set == prev_import_set:
+                    consecutive_no_progress += 1
+                    if consecutive_no_progress >= 3:
+                        die("Terraform apply stuck — same resources failing to import after 3 attempts; check errors above")
+                else:
+                    consecutive_no_progress = 0
+                prev_import_set = import_set
                 log("WARN", f"Found {len(imports)} resource(s) in Azure not in state — importing …")
                 for tf_addr, azure_id in imports:
                     log("INFO", f"  terraform import {tf_addr}")
                     run(f'terraform import "{tf_addr}" "{azure_id}"', cwd=tf_dir, check=False)
-                if attempt == MAX_ATTEMPTS:
-                    die("Terraform apply failed after max attempts — check errors above")
                 log("INFO", "Import done — retrying apply …")
                 time.sleep(3)
                 continue
@@ -1570,6 +1579,8 @@ def phase4_terraform(state: dict):
                 die("Terraform apply failed after max attempts — check errors above")
             log("WARN", f"Apply failed on attempt {attempt} — retrying …")
             time.sleep(5)
+    else:
+        die("Terraform apply did not succeed within max attempts — check errors above")
 
     # Parse outputs
     outs = json.loads(capture("terraform output -json", cwd=tf_dir))
