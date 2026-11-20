@@ -10,9 +10,10 @@ variable "location" {
   type = string
 }
 
-variable "subscription_id" {
-  description = "Azure subscription ID — used to generate a deterministic KV name suffix"
+variable "key_vault_suffix" {
+  description = "Override KV name suffix (set in tfvars after state loss to match existing KV). Empty = use random."
   type        = string
+  default     = ""
 }
 
 variable "tenant_id" {

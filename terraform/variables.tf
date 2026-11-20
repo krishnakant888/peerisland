@@ -92,6 +92,12 @@ variable "letsencrypt_email" {
   default     = ""
 }
 
+variable "key_vault_suffix" {
+  description = "Pin KV name suffix after state loss (e.g. 'sqxc'). Empty = let terraform generate one."
+  type        = string
+  default     = ""
+}
+
 variable "grafana_admin_user" {
   description = "Grafana admin username"
   type        = string
