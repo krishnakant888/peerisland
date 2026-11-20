@@ -1,0 +1,26 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: argo-rollouts-dashboard
+  namespace: argo-rollouts
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/rewrite-target: /$2
+    cert-manager.io/cluster-issuer: "letsencrypt"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - peerisland.centralindia.cloudapp.azure.com
+      secretName: rollouts-tls
+  rules:
+    - host: peerisland.centralindia.cloudapp.azure.com
+      http:
+        paths:
+          - path: /rollouts(/|$)(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: argo-rollouts-dashboard
+                port:
+                  number: 3100

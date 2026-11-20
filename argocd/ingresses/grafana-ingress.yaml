@@ -4,18 +4,21 @@ metadata:
   name: grafana
   namespace: monitoring
   annotations:
-    nginx.ingress.kubernetes.io/rewrite-target: /
     nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
-    cert-manager.io/cluster-issuer: "peerisland-ca"
+    nginx.ingress.kubernetes.io/rewrite-target: /$2
+    cert-manager.io/cluster-issuer: "letsencrypt"
 spec:
   ingressClassName: nginx
   tls:
-    - secretName: grafana-tls
+    - hosts:
+        - peerisland.centralindia.cloudapp.azure.com
+      secretName: grafana-tls
   rules:
-    - http:
+    - host: peerisland.centralindia.cloudapp.azure.com
+      http:
         paths:
-          - path: /grafana
-            pathType: Prefix
+          - path: /grafana(/|$)(.*)
+            pathType: ImplementationSpecific
             backend:
               service:
                 name: monitoring-grafana
