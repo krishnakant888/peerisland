@@ -1524,11 +1524,71 @@ def phase4_terraform(state: dict):
     else:
         log("INFO", "Auto-approved terraform apply (--yes)")
 
-    # Pass 2: let terraform run to completion — no interference.
-    # Import blocks in main.tf handle pre-existing resources.
-    # run() streams output live and raises on non-zero exit.
+    # Pass 2: apply — terraform import blocks handle predictable resources.
+    # Role assignments and federated credentials have unpredictable IDs so
+    # they can't use import blocks; handle their 409s via the retry loop.
     log("INFO", "Applying full infrastructure — this may take 15-20 min for AKS …")
-    run("terraform apply -auto-approve", cwd=tf_dir)
+    MAX_ATTEMPTS = 5
+    for attempt in range(1, MAX_ATTEMPTS + 1):
+        r = subprocess.run(
+            "terraform apply -auto-approve",
+            shell=True, cwd=str(tf_dir), env=os.environ.copy(),
+        )
+        if r.returncode == 0:
+            log("OK", "Terraform apply complete.")
+            break
+
+        # Check for role assignment 409 or federated credential conflicts —
+        # look up their IDs and import, then retry. Any other failure = die.
+        log("WARN", f"Apply failed (attempt {attempt}) — checking for importable conflicts …")
+        imported_any = False
+
+        # Role assignment 409: scan state for failed role assignments
+        ra_result = subprocess.run(
+            "terraform state list", shell=True, cwd=str(tf_dir),
+            capture_output=True, text=True, env=os.environ.copy(),
+        )
+        # Re-run apply with json to get diagnostic details
+        r2 = subprocess.run(
+            "terraform apply -auto-approve -json",
+            shell=True, cwd=str(tf_dir), env=os.environ.copy(),
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+        )
+        for raw in (r2.stdout or "").splitlines():
+            try:
+                msg = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            if msg.get("@level") != "error":
+                continue
+            diag = msg.get("diagnostic", {}) or {}
+            detail = diag.get("detail", "") or diag.get("summary", "") or ""
+            addr = diag.get("address", "")
+            if not addr:
+                continue
+            # Role assignment 409
+            if re.search(r"RoleAssignment(Exists|Already)", detail):
+                guid_match = re.search(r"\b([0-9a-f-]{36})\b", detail)
+                if guid_match:
+                    full_id = _lookup_role_assignment_id(guid_match.group(1).replace("-", ""))
+                    if full_id:
+                        log("INFO", f"Importing role assignment {addr}")
+                        run(f'terraform import "{addr}" "{full_id}"', cwd=tf_dir, check=False)
+                        imported_any = True
+            # Federated credential conflict
+            elif re.search(r"FederatedIdentityCredential.*already exists", detail, re.IGNORECASE):
+                fic_id = _lookup_federated_credential_import_id(addr, tf_dir)
+                if fic_id:
+                    log("INFO", f"Importing federated credential {addr}")
+                    run(f'terraform import "{addr}" "{fic_id}"', cwd=tf_dir, check=False)
+                    imported_any = True
+
+        if not imported_any:
+            die("Terraform apply failed with unrecoverable errors — check output above")
+        log("INFO", "Imports done — retrying apply …")
+        time.sleep(3)
+    else:
+        die("Terraform apply failed after max attempts")
 
     # Parse outputs
     outs = json.loads(capture("terraform output -json", cwd=tf_dir))
