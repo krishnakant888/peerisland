@@ -769,25 +769,33 @@ def _install_win(tool: str) -> bool:
                     break
 
         elif tool == "git":
-            # Install Git via winget — no admin required
+            # Install Git via winget with --scope user to avoid UAC admin prompt
             winget = shutil.which("winget") or str(
                 Path(os.environ.get("LOCALAPPDATA", "")) /
                 "Microsoft" / "WindowsApps" / "winget.exe"
             )
             if not Path(winget).exists():
                 raise RuntimeError("winget not found — install git manually from https://git-scm.com")
-            subprocess.run(
+            r = subprocess.run(
                 [winget, "install", "--id", "Git.Git", "--silent",
+                 "--scope", "user",
                  "--accept-package-agreements", "--accept-source-agreements",
                  "--disable-interactivity"],
-                check=True, timeout=180,
+                capture_output=True, text=True, timeout=300,
             )
-            # Git installs to C:\Program Files\Git\cmd — add to PATH
-            git_cmd = Path("C:/Program Files/Git/cmd")
-            if git_cmd.exists():
-                _add_path_win(git_cmd)
-                os.environ["PATH"] = str(git_cmd) + os.pathsep + os.environ.get("PATH", "")
-            log("OK", "git installed via winget")
+            if r.returncode != 0:
+                log("WARN", f"winget git --scope user failed (rc={r.returncode}): {(r.stdout+r.stderr).strip()[:200]}")
+                raise RuntimeError("git install failed")
+            # User-scope git lands in LocalAppData\Programs\Git
+            for git_cmd in [
+                Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "Git" / "cmd",
+                Path("C:/Program Files/Git/cmd"),
+            ]:
+                if git_cmd.exists():
+                    _add_path_win(git_cmd)
+                    os.environ["PATH"] = str(git_cmd) + os.pathsep + os.environ["PATH"]
+                    break
+            log("OK", "git installed via winget (user scope)")
 
         elif tool == "kubectl":
             v = _kubectl_version()
@@ -1372,9 +1380,74 @@ def _terraform_drift_apply(state: dict):
             _tf_plan(tf_dir)
 
 
+def _ensure_tfstate_rbac(state: dict):
+    """Grant Storage Blob Data Owner on the tfstate SA to the current user if missing.
+
+    Without this role, terraform init/plan/apply all fail with 403
+    AuthorizationPermissionMismatch when use_azuread_auth = true.
+    """
+    tfstate_rg = state["data"].get("tf_state_rg", "peerisland-tfstate-rg")
+    tfstate_sa = state["data"].get("tf_state_sa", "")
+    if not tfstate_sa:
+        # Try to discover it
+        raw = capture(f"az storage account list -g {tfstate_rg} --query \"[].name\" -o tsv", check=False)
+        accounts = [a.strip() for a in raw.splitlines() if a.strip()]
+        if accounts:
+            tfstate_sa = accounts[0]
+            state["data"]["tf_state_sa"] = tfstate_sa
+
+    if not tfstate_sa:
+        log("WARN", "tfstate SA not found — skipping RBAC check")
+        return
+
+    # Get SA resource ID
+    sa_id = capture(
+        f"az storage account show -n {tfstate_sa} -g {tfstate_rg} --query id -o tsv",
+        check=False,
+    ).strip()
+    if not sa_id:
+        log("WARN", f"Could not get resource ID for {tfstate_sa} — skipping RBAC check")
+        return
+
+    # Get current user object ID
+    oid = capture("az ad signed-in-user show --query id -o tsv", check=False).strip()
+    if not oid:
+        oid = capture("az account show --query user.name -o tsv", check=False).strip()
+        # For service principals, use object ID from token
+        sp_raw = capture("az account get-access-token --query accessToken -o tsv", check=False)
+        if not oid:
+            log("WARN", "Could not determine current user object ID — skipping RBAC check")
+            return
+
+    # Check if role already assigned
+    existing = capture(
+        f"az role assignment list --assignee {oid} --scope \"{sa_id}\" "
+        f"--role \"Storage Blob Data Owner\" --query \"[].id\" -o tsv",
+        check=False,
+    ).strip()
+    if existing:
+        log("OK", f"Storage Blob Data Owner already granted on {tfstate_sa}")
+        return
+
+    log("INFO", f"Granting Storage Blob Data Owner on {tfstate_sa} to current user …")
+    r = subprocess.run(
+        f"az role assignment create --assignee {oid} --scope \"{sa_id}\" "
+        f"--role \"Storage Blob Data Owner\"",
+        shell=True, capture_output=True, text=True,
+    )
+    if r.returncode == 0:
+        log("OK", "Role granted — waiting 15s for RBAC to propagate …")
+        time.sleep(15)
+    else:
+        log("WARN", f"Role grant failed: {(r.stderr or r.stdout).strip()[:200]}")
+
+
 def phase4_terraform(state: dict):
     phase_header(4, "Provision Azure infrastructure (Terraform)")
     tf_dir = REPO_ROOT / "terraform"
+
+    # Ensure current user has Storage Blob Data Owner on tfstate SA before init
+    _ensure_tfstate_rbac(state)
 
     run("terraform init -upgrade", cwd=tf_dir)
     run("terraform validate",      cwd=tf_dir)
@@ -1658,7 +1731,7 @@ def phase7_argocd(state: dict):
     # Compute Azure public DNS hostname and patch placeholders
     # Hostname: {project_name}.{location}.cloudapp.azure.com (Azure-provided, no zone needed)
     _project  = _read_tfvar("project_name") or state["data"].get("project_name", "peerisland")
-    _location = _read_tfvar("location")     or state["data"].get("location", "eastus")
+    _location = _read_tfvar("location")     or state["data"].get("location", "centralindia")
     _dns_label   = _project.lower()
     _app_hostname = f"{_dns_label}.{_location}.cloudapp.azure.com"
     state["data"]["app_hostname"] = _app_hostname
@@ -4231,22 +4304,32 @@ def _destroy_namespaces(dry_run: bool):
 
 def _destroy_terraform(state: dict, dry_run: bool):
     """Run terraform destroy, streaming every resource deletion live."""
-    tf_dir      = REPO_ROOT / "terraform"
-    tf_boot_dir = REPO_ROOT / "terraform" / "bootstrap"
+    tf_dir  = REPO_ROOT / "terraform"
+    tf_bin  = shutil.which("terraform")
+    use_tf  = bool(tf_bin and ((tf_dir / "terraform.tfvars").exists() or (tf_dir / ".terraform").exists()))
 
-    tf_bin = shutil.which("terraform")
     if not tf_bin:
-        _dlog("!", "terraform not on PATH — skipping terraform destroy, falling back to az group delete", YELLOW)
-
-    if tf_bin and ((tf_dir / "terraform.tfvars").exists() or (tf_dir / ".terraform").exists()):
+        _dlog("!", "terraform not on PATH — falling back to az group delete", YELLOW)
+    elif use_tf and not dry_run:
+        # terraform init with 60 s timeout — backend may be gone
         _dlog("·", "terraform init …")
-        if not dry_run:
-            subprocess.run("terraform init -upgrade -no-color", shell=True, cwd=str(tf_dir),
-                           capture_output=True)
+        try:
+            r = subprocess.run(
+                "terraform init -upgrade -no-color", shell=True, cwd=str(tf_dir),
+                capture_output=True, timeout=60,
+            )
+            if r.returncode != 0:
+                _dlog("!", "terraform init failed (backend gone?) — falling back to az group delete", YELLOW)
+                use_tf = False
+        except subprocess.TimeoutExpired:
+            _dlog("!", "terraform init timed out (backend unreachable) — falling back to az group delete", YELLOW)
+            use_tf = False
 
-        _dlog("·", "terraform destroy -auto-approve (streaming output) …")
-        if not dry_run:
-            # Stream JSON output so we log every resource destroy event
+    if use_tf:
+        if dry_run:
+            _dlog("$", cyan("terraform destroy -auto-approve -json  (dry-run)"))
+        else:
+            _dlog("·", "terraform destroy -auto-approve (streaming output) …")
             proc = subprocess.Popen(
                 "terraform destroy -auto-approve -json -no-color",
                 shell=True, cwd=str(tf_dir),
@@ -4258,14 +4341,13 @@ def _destroy_terraform(state: dict, dry_run: bool):
                 raw = raw.rstrip()
                 _fh().write(raw + "\n")
                 try:
-                    msg  = json.loads(raw)
-                    mtype = msg.get("type", "")
-                    hook  = msg.get("hook", {}) or {}
-                    res   = hook.get("resource", {}) or {}
-                    addr  = res.get("addr", "")
-                    action = hook.get("action", "")
+                    msg     = json.loads(raw)
+                    mtype   = msg.get("type", "")
+                    hook    = msg.get("hook", {}) or {}
+                    res     = hook.get("resource", {}) or {}
+                    addr    = res.get("addr", "")
+                    action  = hook.get("action", "")
                     elapsed = int(hook.get("elapsed_seconds", 0))
-
                     if mtype == "apply_start" and action == "delete":
                         _dlog("·", f"  {red('–')} destroying  {addr}")
                     elif mtype == "apply_complete" and action == "delete":
@@ -4293,15 +4375,12 @@ def _destroy_terraform(state: dict, dry_run: bool):
                 except json.JSONDecodeError:
                     if raw.strip():
                         _dlog(" ", dim(raw[:200]))
-
             proc.wait()
             _dlog("·", f"  {len(destroyed)} resource(s) destroyed, {len(errored)} error(s)")
             if proc.returncode != 0:
                 _dlog("!", f"terraform destroy exited {proc.returncode} — check Azure Portal for leftovers", YELLOW)
-        else:
-            _dlog("$", cyan("terraform destroy -auto-approve -json  (dry-run)"))
     else:
-        reason = "terraform not on PATH" if not tf_bin else "no terraform state found"
+        reason = "terraform not on PATH" if not tf_bin else ("terraform init failed" if tf_bin else "no terraform state")
         _dlog("!", f"{reason} — falling back to az group delete", YELLOW)
         prefix = _resource_prefix(state)
         rg = state["data"].get("aks_resource_group", f"{prefix}-rg")
@@ -4309,6 +4388,8 @@ def _destroy_terraform(state: dict, dry_run: bool):
         if not dry_run:
             subprocess.run(f"az group delete --name {rg} --yes --no-wait", shell=True)
             _dlog("✓", f"Resource group deletion triggered: {rg}  (running in background)", GREEN)
+        else:
+            _dlog("$", cyan(f"az group delete --name {rg} --yes --no-wait  (dry-run)"))
 
     # tfstate SA/RG intentionally NOT deleted here — Terraform needs the
     # remote backend alive for the duration of `terraform destroy`.
@@ -4478,7 +4559,11 @@ def _destroy_tools(dry_run: bool):
     - pip-uninstalls azure-cli (installed via pip when az was not on PATH).
     - gh is uninstalled via winget (GitHub.cli).
     - git is uninstalled via winget (Git.Git).
+
+    NEVER touches Python — Python is a system prerequisite, not a bootstrap tool.
     """
+    # Safety check — never uninstall Python under any circumstances
+    assert sys.executable, "Python must remain installed"
     # Binary tools directory
     if _TOOLS_DIR.exists():
         _dlog("·", f"Removing tools directory: {_TOOLS_DIR}")
