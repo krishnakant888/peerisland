@@ -49,22 +49,12 @@ provider "azurerm" {
 provider "azuread" {}
 provider "random" {}
 
-# Helm provider — authenticates to AKS using kubelogin with the current
-# Azure CLI session, same mechanism bootstrap.py and kubectl use.
+# Helm provider — reads kubeconfig written by `az aks get-credentials`.
+# Uses a static file path so provider init never depends on computed AKS
+# outputs, which would cause "Invalid provider configuration" on fresh runs.
 provider "helm" {
   kubernetes {
-    # try() prevents "Invalid provider configuration" on fresh runs where AKS
-    # outputs are unknown at plan/import time — falls back to "" until AKS exists.
-    host                   = try(module.aks.host, "")
-    cluster_ca_certificate = try(base64decode(module.aks.cluster_ca_certificate), "")
-    exec {
-      api_version = "client.authentication.k8s.io/v1beta1"
-      command     = "kubelogin"
-      args = [
-        "get-token",
-        "--login",     "azurecli",
-        "--server-id", "6dae42f8-4368-4678-94ff-3960e28e3630",
-      ]
-    }
+    config_path    = pathexpand("~/.kube/config")
+    config_context = "${var.project_name}-${var.environment}-aks"
   }
 }

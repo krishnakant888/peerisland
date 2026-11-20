@@ -1520,7 +1520,7 @@ def phase4_terraform(state: dict):
     ]
     aks_in_state = _in_state("module.aks.azurerm_kubernetes_cluster.main")
     if not aks_in_state:
-        log("INFO", "Pass 1 — creating AKS cluster and dependencies (helm provider needs these first) …")
+        log("INFO", "Pass 1 — creating AKS cluster and dependencies …")
         _tf_plan(tf_dir, plan_file="tfplan_pass1", targets=aks_targets)
         try:
             tf_apply("tfplan_pass1", cwd=tf_dir)
@@ -1530,9 +1530,18 @@ def phase4_terraform(state: dict):
     else:
         log("INFO", "AKS already in state — skipping pass 1")
 
-    # Pass 2: full apply.  providers.tf wraps helm provider values in try() so
-    # provider init doesn't fail when AKS outputs are unknown.
-    # tf_apply(None, ...) uses -auto-approve with full import-detection.
+    # Write kubeconfig so the helm provider (config_path = ~/.kube/config) can
+    # initialize in pass 2.  Derives RG/cluster name from tfvars prefix.
+    prefix = _resource_prefix(state)
+    rg_name = f"{prefix}-rg"
+    aks_name = f"{prefix}-aks"
+    log("INFO", f"Writing kubeconfig for {aks_name} …")
+    run(
+        f'az aks get-credentials --resource-group "{rg_name}" --name "{aks_name}" --overwrite-existing',
+        check=False,
+    )
+
+    # Pass 2: full apply — helm provider reads kubeconfig from ~/.kube/config.
     if not AUTO_APPROVE:
         confirm = input(f"\n  {yellow('Apply the full infrastructure? [y/N]: ')}").strip().lower()
         if confirm != "y":
