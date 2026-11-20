@@ -1475,35 +1475,11 @@ def phase4_terraform(state: dict):
 
     run("terraform validate", cwd=tf_dir)
 
-    # ── Pre-flight imports ────────────────────────────────────────────────────
-    # Adopt resources that exist in Azure/Helm but are not yet in Terraform state.
-    # This prevents 409 Conflict errors during apply.
-
     def _in_state(addr: str) -> bool:
         r = subprocess.run(f'terraform state show "{addr}"',
                            shell=True, capture_output=True, cwd=str(tf_dir),
                            env=os.environ.copy())
         return r.returncode == 0
-
-    # ArgoCD Helm release (installed by bootstrap phase 7, now managed by Terraform)
-    if not _in_state("helm_release.argocd"):
-        helm_check = subprocess.run(
-            "helm status argocd -n argocd -o json",
-            shell=True, capture_output=True, text=True, env=os.environ.copy(),
-        )
-        if helm_check.returncode == 0:
-            log("INFO", "Importing existing ArgoCD Helm release into Terraform state …")
-            run('terraform import helm_release.argocd "argocd/argocd"', cwd=tf_dir, check=False)
-
-    # Federated identity credential (may exist from a previous non-Terraform apply)
-    if not _in_state("azuread_application_federated_identity_credential.github_main"):
-        import_id = _lookup_federated_credential_import_id(
-            "azuread_application_federated_identity_credential.github_main", tf_dir
-        )
-        if import_id:
-            log("INFO", "Importing existing federated identity credential into Terraform state …")
-            run(f'terraform import "azuread_application_federated_identity_credential.github_main" "{import_id}"',
-                cwd=tf_dir, check=False)
 
     # ── Pass 1: AKS-only targeted apply ──────────────────────────────────────
     # The helm provider reads AKS outputs (host, CA cert) at plan time.
@@ -1552,47 +1528,14 @@ def phase4_terraform(state: dict):
     else:
         log("INFO", "Auto-approved terraform apply (--yes)")
 
-    # Retry up to 10 times: each pass imports any "already exists" resources
-    # found and re-applies.  terraform apply -json collects ALL errors in one
-    # pass so typically converges in ≤2 attempts (import-all then apply-clean).
-    MAX_ATTEMPTS = 10
-    consecutive_no_progress = 0
-    prev_import_set: set[str] = set()
-    for attempt in range(1, MAX_ATTEMPTS + 1):
-        log("INFO", f"Applying infrastructure (attempt {attempt}/{MAX_ATTEMPTS}) …")
-        try:
-            to_import = tf_apply(None, cwd=tf_dir)
-            if to_import:
-                patched = [(a, i) for a, i in to_import if a == "__patched__"]
-                imports = [(a, i) for a, i in to_import if a != "__patched__"]
-                if patched:
-                    log("WARN", "HCL patched — retrying apply …")
-                    time.sleep(3)
-                    continue
-                import_set = {a for a, _ in imports}
-                if import_set and import_set == prev_import_set:
-                    consecutive_no_progress += 1
-                    if consecutive_no_progress >= 3:
-                        die("Terraform apply stuck — same resources failing to import after 3 attempts; check errors above")
-                else:
-                    consecutive_no_progress = 0
-                prev_import_set = import_set
-                log("WARN", f"Found {len(imports)} resource(s) in Azure not in state — importing …")
-                for tf_addr, azure_id in imports:
-                    log("INFO", f"  terraform import {tf_addr}")
-                    run(f'terraform import "{tf_addr}" "{azure_id}"', cwd=tf_dir, check=False)
-                log("INFO", "Import done — retrying apply …")
-                time.sleep(3)
-                continue
-            log("OK", "Terraform apply complete.")
-            break
-        except SystemExit:
-            if attempt == MAX_ATTEMPTS:
-                die("Terraform apply failed after max attempts — check errors above")
-            log("WARN", f"Apply failed on attempt {attempt} — retrying …")
-            time.sleep(5)
-    else:
-        die("Terraform apply did not succeed within max attempts — check errors above")
+    # Single apply — terraform import blocks in main.tf handle any pre-existing
+    # resources automatically; no retry loop needed.
+    log("INFO", "Applying full infrastructure …")
+    try:
+        tf_apply(None, cwd=tf_dir)
+        log("OK", "Terraform apply complete.")
+    except SystemExit:
+        die("Terraform apply failed — check errors above")
 
     # Parse outputs
     outs = json.loads(capture("terraform output -json", cwd=tf_dir))
