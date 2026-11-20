@@ -21,7 +21,7 @@ variable "node_subnet_id" {
 variable "system_node_pool_vm_size" {
   description = "VM size for the system node pool — only runs kube-system DaemonSets and control-plane-adjacent pods. A smaller SKU is fine."
   type        = string
-  default     = "Standard_D2s_v3"
+  default     = "Standard_D2s_v5"
 }
 
 variable "node_pool_vm_size" {
