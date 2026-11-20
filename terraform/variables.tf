@@ -86,6 +86,12 @@ variable "github_repo" {
   default     = "peerisland"
 }
 
+variable "letsencrypt_email" {
+  description = "Email address for Let's Encrypt / cert-manager ACME registration"
+  type        = string
+  default     = ""
+}
+
 variable "tags" {
   description = "Common resource tags"
   type        = map(string)
