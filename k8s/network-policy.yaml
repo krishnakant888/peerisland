@@ -85,3 +85,27 @@ spec:
           protocol: UDP
         - port: 53
           protocol: TCP
+---
+# cert-manager HTTP-01 solver: accept traffic from ingress-nginx
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-certmanager-solver
+  namespace: peerisland
+spec:
+  podSelector:
+    matchLabels:
+      acme.cert-manager.io/http01-solver: "true"
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+      ports:
+        - protocol: TCP
+          port: 8089
+  egress:
+    - {}
