@@ -32,6 +32,7 @@ spec:
               cpu: 500m
               memory: 256Mi
           service:
+            appProtocol: false
             annotations:
               service.beta.kubernetes.io/azure-dns-label-name: "peerisland"
               service.beta.kubernetes.io/azure-load-balancer-internal: "false"
