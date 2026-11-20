@@ -1436,8 +1436,8 @@ def _ensure_tfstate_rbac(state: dict):
         shell=True, capture_output=True, text=True,
     )
     if r.returncode == 0:
-        log("OK", "Role granted — waiting 15s for RBAC to propagate …")
-        time.sleep(15)
+        log("OK", "Role granted — waiting 90s for RBAC to propagate …")
+        time.sleep(90)
     else:
         log("WARN", f"Role grant failed: {(r.stderr or r.stdout).strip()[:200]}")
 
@@ -1449,8 +1449,27 @@ def phase4_terraform(state: dict):
     # Ensure current user has Storage Blob Data Owner on tfstate SA before init
     _ensure_tfstate_rbac(state)
 
-    run("terraform init -upgrade", cwd=tf_dir)
-    run("terraform validate",      cwd=tf_dir)
+    # terraform init with retry — RBAC propagation can take several minutes
+    for _init_attempt in range(1, 7):
+        r = subprocess.run("terraform init -upgrade -no-color",
+                           shell=True, cwd=str(tf_dir),
+                           capture_output=True, text=True)
+        if r.returncode == 0:
+            log("OK", "terraform init succeeded")
+            break
+        err = (r.stdout + r.stderr)
+        if "403" in err or "AuthorizationPermissionMismatch" in err or "ListBlobs" in err:
+            wait = 60 * _init_attempt
+            log("WARN", f"terraform init 403 (RBAC not propagated yet) — waiting {wait}s (attempt {_init_attempt}/6) …")
+            time.sleep(wait)
+        else:
+            # Non-403 failure — log and die immediately
+            log("ERR", f"terraform init failed:\n{err[-1000:]}")
+            die("terraform init failed — see above")
+    else:
+        die("terraform init failed with 403 after 6 attempts — check RBAC on tfstate storage account")
+
+    run("terraform validate", cwd=tf_dir)
 
     # ── Pre-flight imports ────────────────────────────────────────────────────
     # Adopt resources that exist in Azure/Helm but are not yet in Terraform state.
