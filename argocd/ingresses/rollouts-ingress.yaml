@@ -5,6 +5,10 @@ metadata:
   namespace: argo-rollouts
   annotations:
     nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/use-regex: "true"
+    nginx.ingress.kubernetes.io/rewrite-target: /$2
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
     cert-manager.io/cluster-issuer: "letsencrypt"
 spec:
   ingressClassName: nginx
@@ -16,8 +20,8 @@ spec:
     - host: peerisland.centralindia.cloudapp.azure.com
       http:
         paths:
-          - path: /rollouts
-            pathType: Prefix
+          - path: /rollouts(/|$)(.*)
+            pathType: ImplementationSpecific
             backend:
               service:
                 name: argo-rollouts-dashboard

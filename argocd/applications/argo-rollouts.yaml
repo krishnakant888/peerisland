@@ -38,8 +38,6 @@ spec:
           enabled: true
           service:
             type: ClusterIP
-          extraArgs:
-            - --rootpath=/rollouts
           securityContext:
             runAsNonRoot: true
 
