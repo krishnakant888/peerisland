@@ -168,16 +168,6 @@ resource "azurerm_role_assignment" "cicd_acr_push" {
 # ── Grafana credentials in Key Vault ─────────────────────────────────────────
 # Source of truth: terraform.tfvars → Key Vault → k8s secret → Grafana helm
 # import blocks bring pre-existing secrets under Terraform management.
-import {
-  to = azurerm_key_vault_secret.grafana_admin_user
-  id = "https://peerisland-prod-kv-sqxc.vault.azure.net/secrets/grafana-admin-user"
-}
-
-import {
-  to = azurerm_key_vault_secret.grafana_admin_password
-  id = "https://peerisland-prod-kv-sqxc.vault.azure.net/secrets/grafana-admin-password"
-}
-
 resource "azurerm_key_vault_secret" "grafana_admin_user" {
   name         = "grafana-admin-user"
   value        = var.grafana_admin_user
