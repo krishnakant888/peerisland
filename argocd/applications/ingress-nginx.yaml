@@ -35,6 +35,7 @@ spec:
             annotations:
               service.beta.kubernetes.io/azure-dns-label-name: "peerisland"
               service.beta.kubernetes.io/azure-load-balancer-internal: "false"
+              service.beta.kubernetes.io/azure-load-balancer-health-probe-protocol: "tcp"
           ingressClassResource:
             name: nginx
             enabled: true
