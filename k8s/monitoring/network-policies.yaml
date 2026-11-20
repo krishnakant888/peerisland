@@ -2,6 +2,22 @@
 # Default deny-all comes from the namespace having no permissive policy —
 # these rules open exactly what each component needs.
 ---
+# Grafana sidecar watches ConfigMaps/Secrets from the Kubernetes API server
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-grafana-apiserver-egress
+  namespace: monitoring
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: grafana
+  policyTypes: [Egress]
+  egress:
+    - ports:
+        - {port: 443,  protocol: TCP}
+        - {port: 6443, protocol: TCP}
+---
 # Alloy needs to reach the API server (:443/:6443) and every node's kubelet (:10250)
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
