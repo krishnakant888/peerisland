@@ -1292,11 +1292,7 @@ def _tf_extract_lock_id(output: str) -> str:
 
 
 def _terraform_drift_apply(state: dict):
-    """Run terraform plan on every bootstrap re-run; auto-apply if drift detected (no prompt).
-
-    Uses the same pre-flight import logic and tf_apply retry loop as phase4_terraform
-    so 409 conflicts and other recoverable errors are handled automatically.
-    """
+    """Run terraform plan on every bootstrap re-run; auto-apply if drift detected (no prompt)."""
     tf_dir = REPO_ROOT / "terraform"
     if not (tf_dir / "terraform.tfvars").exists():
         return
@@ -1317,17 +1313,6 @@ def _terraform_drift_apply(state: dict):
                            shell=True, capture_output=True, cwd=str(tf_dir),
                            env=os.environ.copy())
         return r.returncode == 0
-
-    # Pre-flight: adopt the ArgoCD Helm release if bootstrap installed it outside Terraform.
-    if not _in_state("helm_release.argocd"):
-        helm_check = subprocess.run(
-            "helm status argocd -n argocd -o json",
-            shell=True, capture_output=True, text=True, env=os.environ.copy(),
-        )
-        if helm_check.returncode == 0:
-            log("INFO", "Importing existing ArgoCD Helm release into Terraform state …")
-            subprocess.run('terraform import helm_release.argocd "argocd/argocd"',
-                           shell=True, cwd=str(tf_dir), env=os.environ.copy())
 
     # Pre-flight: adopt federated identity credential that may exist outside Terraform state.
     if not _in_state("azuread_application_federated_identity_credential.github_main"):
@@ -1481,11 +1466,69 @@ def phase4_terraform(state: dict):
                            env=os.environ.copy())
         return r.returncode == 0
 
+    # ── Adopt orphaned resources (exist in Azure but not in state) ───────────
+    # Partial runs can leave resources in Azure without a state entry.
+    # Terraform will refuse to create them ("already exists").  Fix: import
+    # each one that is present in Azure but absent from state before pass 1.
+    prefix   = _resource_prefix(state)
+    sub_id   = _read_tfvar("subscription_id") or state["data"].get("subscription_id", "")
+    rg_name  = f"{prefix}-rg"
+    aks_name = f"{prefix}-aks"
+
+    def _az_exists(cmd: str) -> bool:
+        return subprocess.run(cmd, shell=True, capture_output=True,
+                              env=os.environ.copy()).returncode == 0
+
+    def _tf_import(addr: str, azure_id: str) -> bool:
+        log("INFO", f"Importing orphaned resource: {addr}")
+        r = subprocess.run(
+            f'terraform import "{addr}" "{azure_id}"',
+            shell=True, cwd=str(tf_dir), env=os.environ.copy(),
+        )
+        if r.returncode != 0:
+            log("WARN", f"  import failed (rc={r.returncode}) — will retry in apply loop")
+            return False
+        return True
+
+    if not _in_state("azurerm_resource_group.main"):
+        if _az_exists(f'az group show -n "{rg_name}"'):
+            _tf_import("azurerm_resource_group.main",
+                       f"/subscriptions/{sub_id}/resourceGroups/{rg_name}")
+
+    if not _in_state("azurerm_log_analytics_workspace.main"):
+        if _az_exists(f'az monitor log-analytics workspace show -g "{rg_name}" -n "{prefix}-law"'):
+            _tf_import("azurerm_log_analytics_workspace.main",
+                       f"/subscriptions/{sub_id}/resourceGroups/{rg_name}/providers/Microsoft.OperationalInsights/workspaces/{prefix}-law")
+
+    if not _in_state("module.networking.azurerm_virtual_network.main"):
+        if _az_exists(f'az network vnet show -g "{rg_name}" -n "{prefix}-vnet"'):
+            _tf_import("module.networking.azurerm_virtual_network.main",
+                       f"/subscriptions/{sub_id}/resourceGroups/{rg_name}/providers/Microsoft.Network/virtualNetworks/{prefix}-vnet")
+
+    acr_name = (prefix + "acr").replace("-", "")
+    if not _in_state("module.acr.azurerm_container_registry.main"):
+        if _az_exists(f'az acr show -n "{acr_name}" -g "{rg_name}"'):
+            _tf_import("module.acr.azurerm_container_registry.main",
+                       f"/subscriptions/{sub_id}/resourceGroups/{rg_name}/providers/Microsoft.ContainerRegistry/registries/{acr_name}")
+
+    kv_suffix = _read_tfvar("key_vault_suffix") or ""
+    if kv_suffix and not _in_state("module.keyvault.azurerm_key_vault.main"):
+        kv_name = f"{prefix}-kv-{kv_suffix}"
+        if _az_exists(f'az keyvault show -n "{kv_name}" -g "{rg_name}"'):
+            _tf_import("module.keyvault.azurerm_key_vault.main",
+                       f"/subscriptions/{sub_id}/resourceGroups/{rg_name}/providers/Microsoft.KeyVault/vaults/{kv_name}")
+
+    if not _in_state("module.aks.azurerm_kubernetes_cluster.main"):
+        if _az_exists(f'az aks show -n "{aks_name}" -g "{rg_name}"'):
+            _tf_import("module.aks.azurerm_kubernetes_cluster.main",
+                       f"/subscriptions/{sub_id}/resourceGroups/{rg_name}/providers/Microsoft.ContainerService/managedClusters/{aks_name}")
+
+    kv_name_full = f"{prefix}-kv-{kv_suffix}" if kv_suffix else None
+
     # ── Pass 1: AKS-only targeted apply ──────────────────────────────────────
-    # The helm provider reads AKS outputs (host, CA cert) at plan time.
-    # On a fresh cluster those values are unknown, causing "Invalid provider
-    # configuration". Solution: apply AKS + its dependencies first so the
-    # outputs exist before the full plan runs.
+    # The helm provider reads ~/.kube/config at plan time — kubeconfig must
+    # exist before pass 2.  Apply AKS + its dependencies first so kubeconfig
+    # can be written between passes.
     aks_targets = [
         "module.networking",
         "module.acr",
@@ -1505,9 +1548,6 @@ def phase4_terraform(state: dict):
     # Write kubeconfig so the helm provider (config_path = ~/.kube/config) can
     # initialize in pass 2.  Only runs if AKS is actually in Terraform state.
     if _in_state("module.aks.azurerm_kubernetes_cluster.main"):
-        prefix = _resource_prefix(state)
-        rg_name = f"{prefix}-rg"
-        aks_name = f"{prefix}-aks"
         log("INFO", f"Writing kubeconfig for {aks_name} …")
         run(
             f'az aks get-credentials --resource-group "{rg_name}" --name "{aks_name}" --overwrite-existing',
@@ -1515,6 +1555,24 @@ def phase4_terraform(state: dict):
         )
     else:
         log("WARN", "AKS not in state yet — skipping kubeconfig write; helm resources will apply in a later attempt")
+
+    # Import grafana KV secrets if they already exist in the vault but not in state.
+    # Must run after pass 1 because KV is created in pass 1.
+    if kv_name_full:
+        for secret_tf, secret_name in [
+            ("azurerm_key_vault_secret.grafana_admin_user",     "grafana-admin-user"),
+            ("azurerm_key_vault_secret.grafana_admin_password", "grafana-admin-password"),
+        ]:
+            if not _in_state(secret_tf):
+                raw = capture(
+                    f'az keyvault secret show --vault-name "{kv_name_full}" --name "{secret_name}" --query id -o tsv',
+                    check=False,
+                ).strip()
+                if raw:
+                    # azurerm_key_vault_secret import requires the VERSIONED URL (with version guid)
+                    _tf_import(secret_tf, raw)
+                else:
+                    log("INFO", f"  {secret_name} not in KV yet — terraform will create it")
 
     # Pass 2: full apply — helm provider reads kubeconfig from ~/.kube/config.
     if not AUTO_APPROVE:
@@ -1528,10 +1586,11 @@ def phase4_terraform(state: dict):
     # Role assignments and federated credentials have unpredictable IDs so
     # they can't use import blocks; handle their 409s via the retry loop.
     log("INFO", "Applying full infrastructure — this may take 15-20 min for AKS …")
+    apply_cmd = "terraform apply -auto-approve"
     MAX_ATTEMPTS = 5
     for attempt in range(1, MAX_ATTEMPTS + 1):
         r = subprocess.run(
-            "terraform apply -auto-approve",
+            apply_cmd,
             shell=True, cwd=str(tf_dir), env=os.environ.copy(),
         )
         if r.returncode == 0:
@@ -1543,18 +1602,9 @@ def phase4_terraform(state: dict):
         log("WARN", f"Apply failed (attempt {attempt}) — checking for importable conflicts …")
         imported_any = False
 
-        # Role assignment 409: scan state for failed role assignments
-        ra_result = subprocess.run(
-            "terraform state list", shell=True, cwd=str(tf_dir),
-            capture_output=True, text=True, env=os.environ.copy(),
-        )
-        # Re-run apply with json to get diagnostic details
-        r2 = subprocess.run(
-            "terraform apply -auto-approve -json",
-            shell=True, cwd=str(tf_dir), env=os.environ.copy(),
-            capture_output=True, text=True, encoding="utf-8", errors="replace",
-        )
-        for raw in (r2.stdout or "").splitlines():
+        # Re-run apply with -json to parse diagnostics; _tf_stream shows output live too.
+        _, r2_out = _tf_stream("terraform apply -auto-approve -json", str(tf_dir))
+        for raw in r2_out.splitlines():
             try:
                 msg = json.loads(raw)
             except json.JSONDecodeError:
@@ -1581,6 +1631,14 @@ def phase4_terraform(state: dict):
                 if fic_id:
                     log("INFO", f"Importing federated credential {addr}")
                     run(f'terraform import "{addr}" "{fic_id}"', cwd=tf_dir, check=False)
+                    imported_any = True
+            # Key Vault secret already exists — ID is an HTTPS vault URL, not ARM path
+            elif re.search(r"already exists", detail, re.IGNORECASE) and "vault.azure.net" in detail:
+                kv_url_match = re.search(r'https://[^"]+\.vault\.azure\.net/secrets/[^"/]+(?:/[0-9a-f]+)?', detail)
+                if kv_url_match:
+                    versioned = kv_url_match.group(0)
+                    log("INFO", f"Importing KV secret {addr} → {versioned}")
+                    run(f'terraform import "{addr}" "{versioned}"', cwd=tf_dir, check=False)
                     imported_any = True
 
         if not imported_any:
@@ -2436,9 +2494,29 @@ def phase8_wait_argocd(state: dict):
                     shell=True, capture_output=True,
                 )
 
-            # ── Fix 3: image pull failure — images not in ACR yet ─────────
-            elif "imagepullbackoff" in all_text or "errimagepull" in all_text or "not found" in all_text:
-                log("WARN", f"  {name}: ImagePull error — images may not be in ACR yet (waiting for build)")
+            # ── Fix 3: image pull failure — build images now via ACR Tasks ──
+            elif "imagepullbackoff" in all_text or "errimagepull" in all_text:
+                acr = state["data"].get("acr_name", _acr_prefix(state))
+                tag = _get_deploy_tag(state)
+                log("WARN", f"  {name}: ImagePullBackOff — building missing images in ACR Tasks (tag={tag})")
+                for svc in ("backend", "frontend"):
+                    if not _acr_image_exists(acr, svc, tag):
+                        _acr_build_image(acr, svc, tag)
+                # Hard-refresh ArgoCD so it retries the image pull immediately
+                subprocess.run(
+                    f"kubectl annotate application {name} -n argocd "
+                    f"argocd.argoproj.io/refresh=hard --overwrite",
+                    shell=True, capture_output=True,
+                )
+                # Bounce pods so they pick up the newly pushed image
+                subprocess.run(
+                    "kubectl delete pods -l app=backend -n peerisland --ignore-not-found",
+                    shell=True, capture_output=True,
+                )
+                subprocess.run(
+                    "kubectl delete pods -l app=frontend -n peerisland --ignore-not-found",
+                    shell=True, capture_output=True,
+                )
 
             # ── Fix 4b: cert-manager VWC/MWC caBundle drift ──────────────
             # cert-manager-cainjector and AKS admissionsenforcer both write
@@ -3717,55 +3795,90 @@ def _print_access_summary(state: dict):
     print(f"  {sep}\n")
 
 
+def _acr_image_exists(acr_name: str, repo: str, tag: str) -> bool:
+    """Return True if acr_name.azurecr.io/repo:tag already exists in ACR."""
+    r = subprocess.run(
+        f"az acr manifest list-metadata --registry {acr_name} --name {repo} --query \"[?tags[?@=='{tag}']]\" -o tsv",
+        shell=True, capture_output=True, text=True, env=os.environ.copy(),
+    )
+    return r.returncode == 0 and r.stdout.strip() != ""
+
+
+def _acr_build_image(acr_name: str, service: str, tag: str) -> None:
+    """Build and push a service image using ACR Tasks (no local Docker required)."""
+    src_dir = str(REPO_ROOT / "app" / service)
+    dockerfile = str(REPO_ROOT / "app" / service / "Dockerfile")
+    log("INFO", f"  Building {service}:{tag} in ACR Tasks…")
+    run(
+        f'az acr build --registry {acr_name} '
+        f'--image "{service}:{tag}" --image "{service}:latest" '
+        f'--file "{dockerfile}" "{src_dir}"',
+        check=True,
+    )
+
+
+def _get_deploy_tag(state: dict) -> str:
+    """Return the image tag that the production overlay currently references."""
+    overlay = REPO_ROOT / "k8s" / "overlays" / "production" / "kustomization.yaml"
+    if overlay.exists():
+        txt = overlay.read_text()
+        m = re.search(r"newTag:\s*(\S+)", txt)
+        if m:
+            return m.group(1)
+    # Fall back to HEAD SHA (first 8 chars)
+    r = subprocess.run("git rev-parse HEAD", shell=True, capture_output=True, text=True,
+                       cwd=str(REPO_ROOT))
+    return r.stdout.strip()[:8] if r.returncode == 0 else "latest"
+
+
 def phase9_first_build(state: dict):
-    phase_header(9, "Trigger first build via GitHub Actions")
+    phase_header(9, "Build & push images to ACR")
     org       = state["data"].get("github_org",  "")
     repo_name = state["data"].get("github_repo", "")
-    slug      = f"{org}/{repo_name}"
+    acr_name  = state["data"].get("acr_name", _acr_prefix(state))
 
-    # Ensure all secrets carry real post-Terraform values (Phase 3 ran before TF)
+    # Ensure GitHub secrets carry real post-Terraform values (Phase 3 ran before TF)
     _refresh_github_secrets(state, org, repo_name)
 
-    # Fix global rpc before triggering the build — if app-controller is in a stale
-    # state it won't sync the new images after the build completes
+    # Fix app-controller RPC state before images land so ArgoCD syncs immediately
     _argocd_global_rpc_check_and_fix()
 
-    result = run(
-        f"gh workflow run build-push.yml --repo {slug} --ref main",
-        check=False,
-    )
-    if result.returncode != 0:
-        log("WARN", "gh workflow run failed — triggering via empty git commit instead")
-        run('git commit --allow-empty -m "chore: trigger initial CI build [bootstrap]"')
-        run("git push")
+    tag = _get_deploy_tag(state)
+    log("INFO", f"Target image tag: {tag}")
 
-    log("INFO", "Waiting 20s for the run to register in GitHub…")
-    time.sleep(20)
+    services_missing = [
+        svc for svc in ("backend", "frontend")
+        if not _acr_image_exists(acr_name, svc, tag)
+    ]
 
-    def workflow_complete():
-        r = subprocess.run(
-            f"gh run list --repo {slug} --workflow=build-push.yml --limit=1 "
-            f"--json status,conclusion",
-            shell=True, capture_output=True, text=True,
+    if not services_missing:
+        log("OK", f"All images already in ACR ({tag}) — skipping build")
+    else:
+        log("INFO", f"Images missing from ACR: {services_missing} — building via ACR Tasks")
+        for svc in services_missing:
+            _acr_build_image(acr_name, svc, tag)
+
+        # Update the production overlay to point at this tag (idempotent if already set)
+        overlay_dir = str(REPO_ROOT / "k8s" / "overlays" / "production")
+        acr_server  = f"{acr_name}.azurecr.io"
+        run(
+            f'kustomize edit set image "PLACEHOLDER_ACR/backend={acr_server}/backend:{tag}"',
+            cwd=overlay_dir, check=False,
         )
-        if r.returncode != 0:
-            return False
-        runs = json.loads(r.stdout)
-        if not runs:
-            return False
-        run_info   = runs[0]
-        status     = run_info.get("status",     "")
-        conclusion = run_info.get("conclusion", "")
-        print(f"  {dim(f'  workflow status={status}  conclusion={conclusion}')}", end="\r", flush=True)
-        if status == "completed":
-            if conclusion == "success":
-                return True
-            die(f"GitHub Actions workflow ended with conclusion={conclusion!r}. Check the Actions tab.")
-        return False
+        run(
+            f'kustomize edit set image "PLACEHOLDER_ACR/frontend={acr_server}/frontend:{tag}"',
+            cwd=overlay_dir, check=False,
+        )
+        # Commit and push only if the overlay actually changed
+        diff = subprocess.run("git diff --quiet k8s/overlays/production/kustomization.yaml",
+                              shell=True, cwd=str(REPO_ROOT))
+        if diff.returncode != 0:
+            run("git add k8s/overlays/production/kustomization.yaml", check=False)
+            run(f'git commit -m "chore(deploy): bump images to {tag} [skip ci]"', check=False)
+            run("git push", check=False)
 
-    wait_for(workflow_complete, "build-push.yml workflow completed", timeout=600, interval=15)
-    print()
-    log("OK", "Images built, tagged, pushed to ACR. kustomization.yaml SHA bumped.")
+        log("OK", f"Images built and pushed to ACR ({tag}). ArgoCD will sync shortly.")
+
     mark_done(state, 9)
 
     # Print access summary so the user can verify everything immediately

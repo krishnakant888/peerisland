@@ -307,3 +307,96 @@ data:
             "query": "{ status = error && .service.name = \"peerisland-backend\" }", "limit": 10}]}
       ]
     }
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dashboard-logs
+  namespace: monitoring
+  labels:
+    grafana_dashboard: "1"
+  annotations:
+    grafana_folder: PeerIsland
+data:
+  logs-dashboard.json: |
+    {
+      "title": "PeerIsland Logs",
+      "uid": "peerisland-logs",
+      "schemaVersion": 38,
+      "version": 1,
+      "refresh": "30s",
+      "time": {"from": "now-1h", "to": "now"},
+      "tags": ["peerisland", "logs", "loki"],
+      "panels": [
+        {"id": 1, "type": "stat", "title": "Error Log Rate (last 5m)", "gridPos": {"x": 0, "y": 0, "w": 6, "h": 4},
+          "datasource": {"type": "loki", "uid": "loki"},
+          "targets": [{"expr": "sum(rate({namespace=\"peerisland\"} |= \"error\" [5m]))", "legendFormat": "errors/s"}],
+          "fieldConfig": {"defaults": {"unit": "short", "thresholds": {"steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 1}, {"color": "red", "value": 10}]}}}},
+        {"id": 2, "type": "stat", "title": "Warn Log Rate (last 5m)", "gridPos": {"x": 6, "y": 0, "w": 6, "h": 4},
+          "datasource": {"type": "loki", "uid": "loki"},
+          "targets": [{"expr": "sum(rate({namespace=\"peerisland\"} |= \"warn\" [5m]))", "legendFormat": "warns/s"}],
+          "fieldConfig": {"defaults": {"unit": "short"}}},
+        {"id": 3, "type": "timeseries", "title": "Log Volume by Level", "gridPos": {"x": 0, "y": 4, "w": 12, "h": 8},
+          "datasource": {"type": "loki", "uid": "loki"},
+          "targets": [
+            {"expr": "sum(rate({namespace=\"peerisland\"} |= \"error\" [5m]))", "legendFormat": "error"},
+            {"expr": "sum(rate({namespace=\"peerisland\"} |= \"warn\" [5m]))", "legendFormat": "warn"},
+            {"expr": "sum(rate({namespace=\"peerisland\"} [5m]))", "legendFormat": "all"}],
+          "fieldConfig": {"defaults": {"unit": "short"}}},
+        {"id": 4, "type": "timeseries", "title": "Log Rate by Container", "gridPos": {"x": 12, "y": 4, "w": 12, "h": 8},
+          "datasource": {"type": "loki", "uid": "loki"},
+          "targets": [{"expr": "sum by(container) (rate({namespace=\"peerisland\"}[5m]))", "legendFormat": "{{container}}"}],
+          "fieldConfig": {"defaults": {"unit": "short"}}},
+        {"id": 5, "type": "logs", "title": "Backend Error Logs", "gridPos": {"x": 0, "y": 12, "w": 24, "h": 10},
+          "datasource": {"type": "loki", "uid": "loki"},
+          "targets": [{"expr": "{namespace=\"peerisland\", container=\"backend\"} |= \"error\"", "legendFormat": ""}],
+          "options": {"dedupStrategy": "none", "showLabels": false, "showTime": true, "sortOrder": "Descending", "wrapLogMessage": true}},
+        {"id": 6, "type": "logs", "title": "All Application Logs", "gridPos": {"x": 0, "y": 22, "w": 24, "h": 10},
+          "datasource": {"type": "loki", "uid": "loki"},
+          "targets": [{"expr": "{namespace=\"peerisland\"}", "legendFormat": ""}],
+          "options": {"dedupStrategy": "none", "showLabels": true, "showTime": true, "sortOrder": "Descending", "wrapLogMessage": true}}
+      ]
+    }
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dashboard-argocd
+  namespace: monitoring
+  labels:
+    grafana_dashboard: "1"
+  annotations:
+    grafana_folder: PeerIsland
+data:
+  argocd-dashboard.json: |
+    {
+      "title": "ArgoCD GitOps",
+      "uid": "peerisland-argocd",
+      "schemaVersion": 38,
+      "version": 1,
+      "refresh": "1m",
+      "time": {"from": "now-6h", "to": "now"},
+      "tags": ["peerisland", "argocd", "gitops"],
+      "panels": [
+        {"id": 1, "type": "stat", "title": "Healthy Apps", "gridPos": {"x": 0, "y": 0, "w": 6, "h": 4},
+          "datasource": {"type": "prometheus", "uid": "mimir"},
+          "targets": [{"expr": "count(argocd_app_info{health_status=\"Healthy\"})", "legendFormat": "healthy"}],
+          "fieldConfig": {"defaults": {"thresholds": {"steps": [{"color": "red", "value": null}, {"color": "green", "value": 1}]}}}},
+        {"id": 2, "type": "stat", "title": "Synced Apps", "gridPos": {"x": 6, "y": 0, "w": 6, "h": 4},
+          "datasource": {"type": "prometheus", "uid": "mimir"},
+          "targets": [{"expr": "count(argocd_app_info{sync_status=\"Synced\"})", "legendFormat": "synced"}],
+          "fieldConfig": {"defaults": {"thresholds": {"steps": [{"color": "red", "value": null}, {"color": "green", "value": 1}]}}}},
+        {"id": 3, "type": "stat", "title": "Degraded Apps", "gridPos": {"x": 12, "y": 0, "w": 6, "h": 4},
+          "datasource": {"type": "prometheus", "uid": "mimir"},
+          "targets": [{"expr": "count(argocd_app_info{health_status!~\"Healthy|Progressing\"}) or vector(0)", "legendFormat": "unhealthy"}],
+          "fieldConfig": {"defaults": {"thresholds": {"steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 1}, {"color": "red", "value": 2}]}}}},
+        {"id": 4, "type": "timeseries", "title": "Sync Activity (per hour)", "gridPos": {"x": 0, "y": 4, "w": 12, "h": 8},
+          "datasource": {"type": "prometheus", "uid": "mimir"},
+          "targets": [{"expr": "sum by(app) (increase(argocd_app_sync_total[1h]))", "legendFormat": "{{app}}"}],
+          "fieldConfig": {"defaults": {"unit": "short"}}},
+        {"id": 5, "type": "timeseries", "title": "Reconciliation Duration p99", "gridPos": {"x": 12, "y": 4, "w": 12, "h": 8},
+          "datasource": {"type": "prometheus", "uid": "mimir"},
+          "targets": [{"expr": "histogram_quantile(0.99, sum by(le) (rate(argocd_app_reconcile_bucket[5m])))", "legendFormat": "p99"}],
+          "fieldConfig": {"defaults": {"unit": "s"}}}
+      ]
+    }
