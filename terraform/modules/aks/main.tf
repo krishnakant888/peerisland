@@ -1,5 +1,5 @@
 resource "random_string" "system_node_pool_tmp" {
-  length  = 12
+  length  = 11   # prefixed with "t" below → 12 chars total, always starts with letter
   special = false
   upper   = false
   numeric = true
@@ -37,7 +37,7 @@ resource "azurerm_kubernetes_cluster" "main" {
   default_node_pool {
     name                         = "system"
     vm_size                      = var.system_node_pool_vm_size
-    temporary_name_for_rotation  = random_string.system_node_pool_tmp.result
+    temporary_name_for_rotation  = "t${random_string.system_node_pool_tmp.result}"
     auto_scaling_enabled         = true
     min_count                    = var.node_pool_min_count
     max_count                    = var.node_pool_max_count
@@ -188,7 +188,7 @@ resource "azurerm_network_security_rule" "aks_allow_https" {
 
 
 resource "random_string" "user_node_pool_tmp" {
-  length  = 12
+  length  = 11   # prefixed with "t" below → 12 chars total, always starts with letter
   special = false
   upper   = false
   numeric = true
@@ -205,7 +205,7 @@ resource "random_string" "user_node_pool_tmp" {
 
 resource "azurerm_kubernetes_cluster_node_pool" "user" {
   name                        = "user"
-  temporary_name_for_rotation = random_string.user_node_pool_tmp.result
+  temporary_name_for_rotation = "t${random_string.user_node_pool_tmp.result}"
   kubernetes_cluster_id       = azurerm_kubernetes_cluster.main.id
   vm_size                     = var.node_pool_vm_size
   auto_scaling_enabled        = true

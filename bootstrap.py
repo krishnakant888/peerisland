@@ -1531,15 +1531,18 @@ def phase4_terraform(state: dict):
         log("INFO", "AKS already in state — skipping pass 1")
 
     # Write kubeconfig so the helm provider (config_path = ~/.kube/config) can
-    # initialize in pass 2.  Derives RG/cluster name from tfvars prefix.
-    prefix = _resource_prefix(state)
-    rg_name = f"{prefix}-rg"
-    aks_name = f"{prefix}-aks"
-    log("INFO", f"Writing kubeconfig for {aks_name} …")
-    run(
-        f'az aks get-credentials --resource-group "{rg_name}" --name "{aks_name}" --overwrite-existing',
-        check=False,
-    )
+    # initialize in pass 2.  Only runs if AKS is actually in Terraform state.
+    if _in_state("module.aks.azurerm_kubernetes_cluster.main"):
+        prefix = _resource_prefix(state)
+        rg_name = f"{prefix}-rg"
+        aks_name = f"{prefix}-aks"
+        log("INFO", f"Writing kubeconfig for {aks_name} …")
+        run(
+            f'az aks get-credentials --resource-group "{rg_name}" --name "{aks_name}" --overwrite-existing',
+            check=False,
+        )
+    else:
+        log("WARN", "AKS not in state yet — skipping kubeconfig write; helm resources will apply in a later attempt")
 
     # Pass 2: full apply — helm provider reads kubeconfig from ~/.kube/config.
     if not AUTO_APPROVE:
