@@ -107,6 +107,22 @@ spec:
       ports:
         - {port: 3000, protocol: TCP}
 ---
+# Allow kube-apiserver to reach prometheus-adapter on port 6443 (APIService discovery)
+# The AKS control plane has no namespace/pod selector — must allow from anywhere.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-prometheus-adapter-apiserver
+  namespace: monitoring
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: prometheus-adapter
+  policyTypes: [Ingress]
+  ingress:
+    - ports:
+        - {port: 6443, protocol: TCP}
+---
 # Allow Prometheus scraping of monitoring stack self-metrics from Alloy (which is also in monitoring)
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
