@@ -1,12 +1,58 @@
+# ── Auto-import blocks ────────────────────────────────────────────────────────
+# If a resource already exists in Azure (e.g. after a partial run or state loss)
+# these blocks import it automatically — no "already exists" error, no manual
+# terraform import needed. Idempotent: once in state they become no-ops.
+locals {
+  sub         = var.subscription_id
+  pfx         = "${var.project_name}-${var.environment}"
+  rg          = "${var.project_name}-${var.environment}-rg"
+  kvsuffix    = substr(md5(var.subscription_id), 0, 4)
+  name_prefix = "${var.project_name}-${var.environment}"
+  common_tags = merge(var.tags, { Environment = var.environment })
+}
+
+import {
+  to = azurerm_resource_group.main
+  id = "/subscriptions/${local.sub}/resourceGroups/${local.rg}"
+}
+
+import {
+  to = azurerm_log_analytics_workspace.main
+  id = "/subscriptions/${local.sub}/resourceGroups/${local.rg}/providers/Microsoft.OperationalInsights/workspaces/${local.pfx}-law"
+}
+
+import {
+  to = module.networking.azurerm_virtual_network.main
+  id = "/subscriptions/${local.sub}/resourceGroups/${local.rg}/providers/Microsoft.Network/virtualNetworks/${local.pfx}-vnet"
+}
+
+import {
+  to = module.keyvault.azurerm_key_vault.main
+  id = "/subscriptions/${local.sub}/resourceGroups/${local.rg}/providers/Microsoft.KeyVault/vaults/${local.pfx}-kv-${local.kvsuffix}"
+}
+
+import {
+  to = module.acr.azurerm_container_registry.main
+  id = "/subscriptions/${local.sub}/resourceGroups/${local.rg}/providers/Microsoft.ContainerRegistry/registries/${replace("${local.pfx}acr", "-", "")}"
+}
+
+import {
+  to = module.aks.azurerm_kubernetes_cluster.main
+  id = "/subscriptions/${local.sub}/resourceGroups/${local.rg}/providers/Microsoft.ContainerService/managedClusters/${local.pfx}-aks"
+}
+
+import {
+  to = azurerm_key_vault_secret.grafana_admin_user
+  id = "https://${local.pfx}-kv-${local.kvsuffix}.vault.azure.net/secrets/grafana-admin-user"
+}
+
+import {
+  to = azurerm_key_vault_secret.grafana_admin_password
+  id = "https://${local.pfx}-kv-${local.kvsuffix}.vault.azure.net/secrets/grafana-admin-password"
+}
+
 data "azurerm_client_config" "current" {}
 data "azurerm_subscription" "current" {}
-
-locals {
-  name_prefix = "${var.project_name}-${var.environment}"
-  common_tags = merge(var.tags, {
-    Environment = var.environment
-  })
-}
 
 resource "azurerm_resource_group" "main" {
   name     = "${local.name_prefix}-rg"
@@ -45,6 +91,7 @@ module "keyvault" {
   source = "./modules/keyvault"
 
   name_prefix         = local.name_prefix
+  subscription_id     = var.subscription_id
   resource_group_name = azurerm_resource_group.main.name
   location            = azurerm_resource_group.main.location
   tenant_id           = data.azurerm_client_config.current.tenant_id

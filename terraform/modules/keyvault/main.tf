@@ -1,11 +1,6 @@
-resource "random_string" "kv_suffix" {
-  length  = 4
-  upper   = false
-  special = false
-}
-
 resource "azurerm_key_vault" "main" {
-  name                        = "${var.name_prefix}-kv-${random_string.kv_suffix.result}"
+  # Deterministic 4-char suffix from subscription ID — globally unique, importable without random state.
+  name                        = "${var.name_prefix}-kv-${substr(md5(var.subscription_id), 0, 4)}"
   location                    = var.location
   resource_group_name         = var.resource_group_name
   enabled_for_disk_encryption = true

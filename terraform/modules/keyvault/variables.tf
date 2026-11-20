@@ -10,6 +10,11 @@ variable "location" {
   type = string
 }
 
+variable "subscription_id" {
+  description = "Azure subscription ID — used to generate a deterministic KV name suffix"
+  type        = string
+}
+
 variable "tenant_id" {
   type = string
 }
