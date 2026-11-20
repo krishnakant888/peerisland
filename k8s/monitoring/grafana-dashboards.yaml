@@ -185,3 +185,125 @@ data:
           "fieldConfig": {"defaults": {"unit": "bytes"}}}
       ]
     }
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dashboard-slo
+  namespace: monitoring
+  labels:
+    grafana_dashboard: "1"
+  annotations:
+    grafana_folder: PeerIsland
+data:
+  slo-dashboard.json: |
+    {
+      "title": "PeerIsland SLO",
+      "uid": "peerisland-slo",
+      "schemaVersion": 38,
+      "version": 1,
+      "refresh": "5m",
+      "time": {"from": "now-30d", "to": "now"},
+      "tags": ["peerisland", "slo"],
+      "panels": [
+        {"id": 1, "type": "gauge", "title": "Availability SLO (target: 99.9%)", "gridPos": {"x": 0, "y": 0, "w": 8, "h": 8},
+          "datasource": {"type": "prometheus", "uid": "mimir"},
+          "targets": [{"expr": "100 * (1 - sum(rate(http_requests_total{namespace=\"peerisland\",status_code=~\"5..\"}[30d])) / sum(rate(http_requests_total{namespace=\"peerisland\"}[30d])))", "legendFormat": "availability %"}],
+          "options": {"reduceOptions": {"calcs": ["lastNotNull"]}},
+          "fieldConfig": {"defaults": {"unit": "percent", "min": 99, "max": 100,
+            "thresholds": {"steps": [{"color": "red", "value": null}, {"color": "yellow", "value": 99.5}, {"color": "green", "value": 99.9}]}}}},
+        {"id": 2, "type": "gauge", "title": "Error Budget Remaining (30d)", "gridPos": {"x": 8, "y": 0, "w": 8, "h": 8},
+          "datasource": {"type": "prometheus", "uid": "mimir"},
+          "targets": [{"expr": "100 * (1 - (sum(rate(http_requests_total{namespace=\"peerisland\",status_code=~\"5..\"}[30d])) / sum(rate(http_requests_total{namespace=\"peerisland\"}[30d]))) / 0.001)", "legendFormat": "budget %"}],
+          "options": {"reduceOptions": {"calcs": ["lastNotNull"]}},
+          "fieldConfig": {"defaults": {"unit": "percent", "min": 0, "max": 100,
+            "thresholds": {"steps": [{"color": "red", "value": null}, {"color": "yellow", "value": 25}, {"color": "green", "value": 50}]}}}},
+        {"id": 3, "type": "stat", "title": "Current Error Rate (1h)", "gridPos": {"x": 16, "y": 0, "w": 8, "h": 8},
+          "datasource": {"type": "prometheus", "uid": "mimir"},
+          "targets": [{"expr": "100 * sum(rate(http_requests_total{namespace=\"peerisland\",status_code=~\"5..\"}[1h])) / sum(rate(http_requests_total{namespace=\"peerisland\"}[1h]))", "legendFormat": "error %"}],
+          "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "colorMode": "background"},
+          "fieldConfig": {"defaults": {"unit": "percent", "thresholds": {"steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 0.05}, {"color": "red", "value": 0.14}]}}}},
+        {"id": 4, "type": "timeseries", "title": "SLO Burn Rate (fast: 1h, slow: 6h)", "gridPos": {"x": 0, "y": 8, "w": 24, "h": 8},
+          "datasource": {"type": "prometheus", "uid": "mimir"},
+          "targets": [
+            {"expr": "sum(rate(http_requests_total{namespace=\"peerisland\",status_code=~\"5..\"}[1h])) / sum(rate(http_requests_total{namespace=\"peerisland\"}[1h])) / 0.001", "legendFormat": "burn rate 1h"},
+            {"expr": "sum(rate(http_requests_total{namespace=\"peerisland\",status_code=~\"5..\"}[6h])) / sum(rate(http_requests_total{namespace=\"peerisland\"}[6h])) / 0.001", "legendFormat": "burn rate 6h"}],
+          "fieldConfig": {"defaults": {"unit": "short", "custom": {"lineWidth": 2}},
+            "overrides": [
+              {"matcher": {"id": "byName", "options": "burn rate 1h"}, "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "red"}}]},
+              {"matcher": {"id": "byName", "options": "burn rate 6h"}, "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "orange"}}]}]}},
+        {"id": 5, "type": "timeseries", "title": "Availability Over Time (1h windows)", "gridPos": {"x": 0, "y": 16, "w": 24, "h": 8},
+          "datasource": {"type": "prometheus", "uid": "mimir"},
+          "targets": [{"expr": "100 * (1 - sum(rate(http_requests_total{namespace=\"peerisland\",status_code=~\"5..\"}[1h])) / sum(rate(http_requests_total{namespace=\"peerisland\"}[1h])))", "legendFormat": "availability %"}],
+          "fieldConfig": {"defaults": {"unit": "percent", "min": 99, "max": 100,
+            "thresholds": {"steps": [{"color": "red", "value": null}, {"color": "yellow", "value": 99.5}, {"color": "green", "value": 99.9}]},
+            "custom": {"thresholdsStyle": {"mode": "area"}}}}},
+        {"id": 6, "type": "timeseries", "title": "p99 Latency vs 500ms SLO", "gridPos": {"x": 0, "y": 24, "w": 24, "h": 8},
+          "datasource": {"type": "prometheus", "uid": "mimir"},
+          "targets": [{"expr": "histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket{namespace=\"peerisland\"}[5m])) by (le)) * 1000", "legendFormat": "p99 (ms)"}],
+          "fieldConfig": {"defaults": {"unit": "ms",
+            "thresholds": {"steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 300}, {"color": "red", "value": 500}]},
+            "custom": {"thresholdsStyle": {"mode": "line"}}}}}
+      ]
+    }
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dashboard-rollouts
+  namespace: monitoring
+  labels:
+    grafana_dashboard: "1"
+  annotations:
+    grafana_folder: PeerIsland
+data:
+  rollout-dashboard.json: |
+    {
+      "title": "PeerIsland Rollouts",
+      "uid": "peerisland-rollouts",
+      "schemaVersion": 38,
+      "version": 1,
+      "refresh": "30s",
+      "time": {"from": "now-2h", "to": "now"},
+      "tags": ["peerisland", "rollouts", "deployments"],
+      "panels": [
+        {"id": 1, "type": "stat", "title": "Frontend — Active Ready Pods", "gridPos": {"x": 0, "y": 0, "w": 6, "h": 4},
+          "datasource": {"type": "prometheus", "uid": "mimir"},
+          "targets": [{"expr": "sum(kube_replicaset_status_ready_replicas{namespace=\"peerisland\",replicaset=~\"frontend.*\"})", "legendFormat": "ready"}],
+          "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "colorMode": "background"},
+          "fieldConfig": {"defaults": {"thresholds": {"steps": [{"color": "red", "value": null}, {"color": "yellow", "value": 1}, {"color": "green", "value": 2}]}}}},
+        {"id": 2, "type": "stat", "title": "Backend — Active Ready Pods", "gridPos": {"x": 6, "y": 0, "w": 6, "h": 4},
+          "datasource": {"type": "prometheus", "uid": "mimir"},
+          "targets": [{"expr": "sum(kube_replicaset_status_ready_replicas{namespace=\"peerisland\",replicaset=~\"backend.*\"})", "legendFormat": "ready"}],
+          "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "colorMode": "background"},
+          "fieldConfig": {"defaults": {"thresholds": {"steps": [{"color": "red", "value": null}, {"color": "yellow", "value": 1}, {"color": "green", "value": 2}]}}}},
+        {"id": 3, "type": "stat", "title": "Error Rate (2m — canary window)", "gridPos": {"x": 12, "y": 0, "w": 6, "h": 4},
+          "datasource": {"type": "prometheus", "uid": "mimir"},
+          "targets": [{"expr": "100 * sum(rate(http_requests_total{namespace=\"peerisland\",status_code=~\"5..\"}[2m])) / sum(rate(http_requests_total{namespace=\"peerisland\"}[2m]))", "legendFormat": "error %"}],
+          "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "colorMode": "background"},
+          "fieldConfig": {"defaults": {"unit": "percent", "thresholds": {"steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 1}, {"color": "red", "value": 5}]}}}},
+        {"id": 4, "type": "stat", "title": "P99 Latency (2m — canary window)", "gridPos": {"x": 18, "y": 0, "w": 6, "h": 4},
+          "datasource": {"type": "prometheus", "uid": "mimir"},
+          "targets": [{"expr": "histogram_quantile(0.99, sum by(le) (rate(http_request_duration_seconds_bucket{namespace=\"peerisland\"}[2m])))", "legendFormat": "p99"}],
+          "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "colorMode": "background"},
+          "fieldConfig": {"defaults": {"unit": "s", "thresholds": {"steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 0.5}, {"color": "red", "value": 1}]}}}},
+        {"id": 5, "type": "timeseries", "title": "ReplicaSet Ready Pods Over Time", "gridPos": {"x": 0, "y": 4, "w": 12, "h": 8},
+          "datasource": {"type": "prometheus", "uid": "mimir"},
+          "targets": [{"expr": "kube_replicaset_status_ready_replicas{namespace=\"peerisland\"}", "legendFormat": "{{replicaset}}"}],
+          "fieldConfig": {"defaults": {"unit": "short", "min": 0}}},
+        {"id": 6, "type": "timeseries", "title": "Error Rate During Rollout", "gridPos": {"x": 12, "y": 4, "w": 12, "h": 8},
+          "datasource": {"type": "prometheus", "uid": "mimir"},
+          "targets": [{"expr": "100 * sum(rate(http_requests_total{namespace=\"peerisland\",status_code=~\"5..\"}[2m])) / sum(rate(http_requests_total{namespace=\"peerisland\"}[2m]))", "legendFormat": "error %"}],
+          "fieldConfig": {"defaults": {"unit": "percent",
+            "thresholds": {"steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 1}, {"color": "red", "value": 5}]},
+            "custom": {"thresholdsStyle": {"mode": "line"}}}}},
+        {"id": 7, "type": "timeseries", "title": "Pod Restarts (1h)", "gridPos": {"x": 0, "y": 12, "w": 12, "h": 8},
+          "datasource": {"type": "prometheus", "uid": "mimir"},
+          "targets": [{"expr": "increase(kube_pod_container_status_restarts_total{namespace=\"peerisland\"}[1h])", "legendFormat": "{{pod}}/{{container}}"}],
+          "fieldConfig": {"defaults": {"unit": "short"}}},
+        {"id": 8, "type": "traces", "title": "Error Traces During Rollout", "gridPos": {"x": 12, "y": 12, "w": 12, "h": 8},
+          "datasource": {"type": "tempo", "uid": "tempo"},
+          "targets": [{"datasource": {"type": "tempo", "uid": "tempo"}, "queryType": "traceql",
+            "query": "{ status = error && .service.name = \"peerisland-backend\" }", "limit": 10}]}
+      ]
+    }

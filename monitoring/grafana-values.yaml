@@ -146,5 +146,20 @@ grafana.ini:
   feature_toggles:
     enable: traceqlEditor tempoSearch
 
+# Key Vault CSI driver — mounts grafana-admin-{user,password} from KV and syncs to grafana-admin-secret
+# SecretProviderClass is in k8s/monitoring/secret-provider-grafana.yaml
+extraVolumes:
+  - name: grafana-kv-secrets
+    csi:
+      driver: secrets-store.csi.k8s.io
+      readOnly: true
+      volumeAttributes:
+        secretProviderClass: grafana-admin-keyvault
+
+extraVolumeMounts:
+  - name: grafana-kv-secrets
+    mountPath: /mnt/grafana-secrets
+    readOnly: true
+
 ingress:
   enabled: false   # managed by argocd/ingresses/grafana-ingress.yaml
