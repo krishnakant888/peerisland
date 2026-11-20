@@ -56,6 +56,9 @@ resource "azurerm_kubernetes_cluster" "main" {
     log_analytics_workspace_id = var.log_analytics_workspace_id
   }
 
+  oidc_issuer_enabled       = true
+  workload_identity_enabled = true
+
   key_vault_secrets_provider {
     secret_rotation_enabled  = true
     secret_rotation_interval = "2m"
@@ -91,6 +94,83 @@ resource "azurerm_role_assignment" "aks_vnet_network_contributor" {
   role_definition_name             = "Network Contributor"
   scope                            = var.vnet_id
   skip_service_principal_aad_check = true
+}
+
+# Grant Network Contributor on the AKS node resource group (MC_*) so the
+# cloud-controller-manager can add NodePort rules to the AKS-managed NSG
+# (aks-agentpool-*-nsg) when LoadBalancer services are provisioned.
+resource "azurerm_role_assignment" "aks_node_rg_network_contributor" {
+  principal_id                     = azurerm_kubernetes_cluster.main.identity[0].principal_id
+  role_definition_name             = "Network Contributor"
+  scope                            = "/subscriptions/${data.azurerm_subscription.current.subscription_id}/resourceGroups/${azurerm_kubernetes_cluster.main.node_resource_group}"
+  skip_service_principal_aad_check = true
+}
+
+data "azurerm_subscription" "current" {}
+
+# The KV secrets provider managed identity is auto-created by AKS in the MC_ resource group.
+# We add a federated credential so the monitoring-grafana SA can exchange its token for KV access.
+data "azurerm_user_assigned_identity" "kv_secrets_provider" {
+  name                = "azurekeyvaultsecretsprovider-${azurerm_kubernetes_cluster.main.name}"
+  resource_group_name = azurerm_kubernetes_cluster.main.node_resource_group
+
+  depends_on = [azurerm_kubernetes_cluster.main]
+}
+
+resource "azurerm_federated_identity_credential" "grafana_kv" {
+  name                = "grafana-workload-identity"
+  resource_group_name = azurerm_kubernetes_cluster.main.node_resource_group
+  parent_id           = data.azurerm_user_assigned_identity.kv_secrets_provider.id
+  issuer              = azurerm_kubernetes_cluster.main.oidc_issuer_url
+  subject             = "system:serviceaccount:monitoring:monitoring-grafana"
+  audience            = ["api://AzureADTokenExchange"]
+}
+
+# Find all NSGs that AKS created in the node resource group.
+# Note: on a brand-new cluster this data source resolves after the node pool
+# is ready. Run `terraform apply` twice on the very first deployment if the
+# plan shows "values not yet known" for the NSG rule resources.
+data "azurerm_resources" "aks_node_nsgs" {
+  type                = "Microsoft.Network/networkSecurityGroups"
+  resource_group_name = azurerm_kubernetes_cluster.main.node_resource_group
+
+  depends_on = [azurerm_kubernetes_cluster_node_pool.user]
+}
+
+resource "azurerm_network_security_rule" "aks_allow_http" {
+  for_each = {
+    for nsg in data.azurerm_resources.aks_node_nsgs.resources : nsg.name => nsg
+  }
+
+  name                        = "Allow-HTTP-Inbound"
+  priority                    = 200
+  direction                   = "Inbound"
+  access                      = "Allow"
+  protocol                    = "Tcp"
+  source_port_range           = "*"
+  destination_port_range      = "80"
+  source_address_prefix       = "Internet"
+  destination_address_prefix  = "*"
+  resource_group_name         = azurerm_kubernetes_cluster.main.node_resource_group
+  network_security_group_name = each.key
+}
+
+resource "azurerm_network_security_rule" "aks_allow_https" {
+  for_each = {
+    for nsg in data.azurerm_resources.aks_node_nsgs.resources : nsg.name => nsg
+  }
+
+  name                        = "Allow-HTTPS-Inbound"
+  priority                    = 201
+  direction                   = "Inbound"
+  access                      = "Allow"
+  protocol                    = "Tcp"
+  source_port_range           = "*"
+  destination_port_range      = "443"
+  source_address_prefix       = "Internet"
+  destination_address_prefix  = "*"
+  resource_group_name         = azurerm_kubernetes_cluster.main.node_resource_group
+  network_security_group_name = each.key
 }
 
 resource "azurerm_kubernetes_cluster_node_pool" "user" {
