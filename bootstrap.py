@@ -122,6 +122,7 @@ def die(msg: str):
 # ── subprocess ────────────────────────────────────────────────────────────────
 
 DRY_RUN = False
+AUTO_APPROVE = False  # set by --yes / -y
 
 def run(
     cmd,
@@ -638,7 +639,10 @@ def _ensure_tfvars(state: dict):
     tfvars.write_text(content, encoding="utf-8")
     log("OK",   f"Created terraform/terraform.tfvars (github_org={org or '?'}, ip={ip or '?'})")
     log("INFO", f"Review {tfvars} before continuing — edit node sizes, tags, etc. if needed")
-    input(f"  {yellow('Press Enter once you have reviewed terraform.tfvars…')}")
+    if not AUTO_APPROVE:
+        input(f"  {yellow('Press Enter once you have reviewed terraform.tfvars…')}")
+    else:
+        log("INFO", "Auto-approved terraform.tfvars review (--yes)")
 
 
 # ── tool auto-installer ───────────────────────────────────────────────────────
@@ -701,12 +705,89 @@ def _install_win(tool: str) -> bool:
         elif tool == "az":
             # pip install azure-cli works without admin and uses the already-installed Python
             py = sys.executable
+            py_dir = Path(py).parent
             subprocess.run([py, "-m", "pip", "install", "--quiet", "azure-cli"], check=True)
-            # az lands in the Scripts folder next to python.exe
-            scripts = Path(py).parent / "Scripts"
-            if scripts.exists():
-                _add_path_win(scripts)
-            log("OK", "Azure CLI installed via pip")
+            # az.cmd calls `python` internally — ensure both python.exe dir AND Scripts are on PATH
+            # so that az.cmd can find python when it runs.
+            scripts = py_dir / "Scripts"
+            for d in [py_dir, scripts]:
+                if d.exists():
+                    _add_path_win(d)
+                    os.environ["PATH"] = str(d) + os.pathsep + os.environ["PATH"]
+            log("OK", f"Azure CLI installed via pip  (az.cmd → {scripts})")
+
+        elif tool == "gh":
+            # Try winget first, fall back to direct GitHub release download
+            winget = shutil.which("winget") or str(
+                Path(os.environ.get("LOCALAPPDATA", "")) /
+                "Microsoft" / "WindowsApps" / "winget.exe"
+            )
+            installed_via_winget = False
+            if Path(winget).exists():
+                r = subprocess.run(
+                    [winget, "install", "--id", "GitHub.cli", "--silent",
+                     "--accept-package-agreements", "--accept-source-agreements",
+                     "--disable-interactivity"],
+                    capture_output=True, text=True, timeout=180,
+                )
+                if r.returncode == 0:
+                    installed_via_winget = True
+                    log("OK", "gh installed via winget")
+                else:
+                    log("WARN", f"winget install gh failed (rc={r.returncode}) — trying direct download")
+
+            if not installed_via_winget:
+                # Direct download from GitHub releases
+                req = urllib.request.Request(
+                    "https://api.github.com/repos/cli/cli/releases/latest",
+                    headers={"Accept": "application/vnd.github+json", "User-Agent": "bootstrap.py"},
+                )
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    rel = json.loads(resp.read())
+                asset_url = next(
+                    a["browser_download_url"] for a in rel["assets"]
+                    if "windows_amd64" in a["name"] and a["name"].endswith(".zip")
+                )
+                with tempfile.TemporaryDirectory() as tmp:
+                    z = Path(tmp) / "gh.zip"
+                    _fetch(asset_url, z)
+                    with zipfile.ZipFile(z) as zf:
+                        exe_name = next(n for n in zf.namelist() if n.endswith("gh.exe"))
+                        zf.extract(exe_name, tmp)
+                        Path(tmp, exe_name).rename(_TOOLS_DIR / "gh.exe")
+                log("OK", f"gh {rel['tag_name']} → {_TOOLS_DIR}")
+
+            # Refresh PATH — winget installs to a different location
+            for candidate in [
+                Path(os.environ.get("LOCALAPPDATA", "")) / "Microsoft" / "WinGet" / "Links",
+                Path(os.environ.get("LOCALAPPDATA", "")) / "Microsoft" / "WinGet" / "Packages" / "GitHub.cli_Microsoft.Winget.Source_8wekyb3d8bbwe",
+                _TOOLS_DIR,
+            ]:
+                if candidate.exists() and any(candidate.glob("gh*")):
+                    _add_path_win(candidate)
+                    os.environ["PATH"] = str(candidate) + os.pathsep + os.environ["PATH"]
+                    break
+
+        elif tool == "git":
+            # Install Git via winget — no admin required
+            winget = shutil.which("winget") or str(
+                Path(os.environ.get("LOCALAPPDATA", "")) /
+                "Microsoft" / "WindowsApps" / "winget.exe"
+            )
+            if not Path(winget).exists():
+                raise RuntimeError("winget not found — install git manually from https://git-scm.com")
+            subprocess.run(
+                [winget, "install", "--id", "Git.Git", "--silent",
+                 "--accept-package-agreements", "--accept-source-agreements",
+                 "--disable-interactivity"],
+                check=True, timeout=180,
+            )
+            # Git installs to C:\Program Files\Git\cmd — add to PATH
+            git_cmd = Path("C:/Program Files/Git/cmd")
+            if git_cmd.exists():
+                _add_path_win(git_cmd)
+                os.environ["PATH"] = str(git_cmd) + os.pathsep + os.environ.get("PATH", "")
+            log("OK", "git installed via winget")
 
         elif tool == "kubectl":
             v = _kubectl_version()
@@ -884,18 +965,18 @@ def _auto_install(tool: str) -> bool:
 
 
 # Tools that can be auto-installed on demand
-_AUTO_INSTALLABLE = {"terraform", "az", "kubectl", "kubelogin", "helm", "argocd", "kustomize", "kubectl-argo-rollouts"}
+_AUTO_INSTALLABLE = {"terraform", "az", "kubectl", "kubelogin", "helm", "argocd", "kustomize", "kubectl-argo-rollouts", "gh", "git"}
 
 # Track which tools have already been verified this session to avoid re-checking
 _verified_tools: set[str] = set()
 
 
 _TOOL_PROBES = {
-    "az":                    "az version",
+    "az":                    "az --version",
     "kubectl":               "kubectl version --client",
     "kubelogin":             "kubelogin --version",
     "helm":                  "helm version",
-    "argocd":                "argocd version --client",
+    "argocd":                "argocd version --client --short",
     "kustomize":             "kustomize version",
     "terraform":             "terraform --version",
     "gh":                    "gh --version",
@@ -962,24 +1043,14 @@ def _register_azure_providers():
 def phase1_preflight(state: dict):
     phase_header(1, "Pre-flight checks")
 
-    # All tools needed across all phases — install everything upfront.
-    # gh and git must be pre-installed (no unattended install path).
-    # Everything else is auto-installed via _require_tool().
+    # All tools needed across all phases — auto-installed via _require_tool().
     all_tools = [
+        "gh", "git",
         "terraform", "az", "kubectl", "kubelogin",
         "helm", "argocd", "kustomize",
     ]
-    manual_tools = ["gh", "git"]
 
     still_missing = []
-    for tool in manual_tools:
-        probe = {"gh": "gh --version", "git": "git --version"}[tool]
-        if subprocess.run(probe, shell=True, capture_output=True).returncode == 0:
-            log("OK", f"{tool:12} installed")
-        else:
-            log("ERR", f"{tool:12} NOT FOUND — install manually and re-run")
-            still_missing.append(tool)
-
     for tool in all_tools:
         try:
             _require_tool(tool)
@@ -1060,12 +1131,19 @@ def phase2_bootstrap_tfstate(state: dict):
             # Patch providers.tf backend block automatically
             providers_tf = REPO_ROOT / "terraform" / "providers.tf"
             pf_content = providers_tf.read_text(encoding="utf-8")
-            if "REPLACE_WITH_BOOTSTRAP_OUTPUT" in pf_content:
-                pf_content = pf_content.replace("REPLACE_WITH_BOOTSTRAP_OUTPUT", sa)
-                providers_tf.write_text(pf_content, encoding="utf-8")
+            # Always patch — replace placeholder OR the previously-written SA name
+            # so a re-bootstrap after destroy picks up the new randomly-suffixed SA.
+            import re as _re
+            patched = _re.sub(
+                r'(storage_account_name\s*=\s*")[^"]*(")',
+                rf'\g<1>{sa}\g<2>',
+                pf_content,
+            )
+            if patched != pf_content:
+                providers_tf.write_text(patched, encoding="utf-8")
                 log("OK", f"providers.tf backend patched → storage_account_name = {sa}")
             else:
-                log("INFO", "providers.tf already configured — skipping patch")
+                log("INFO", "providers.tf backend already up-to-date")
 
     mark_done(state, 2)
 
@@ -1337,9 +1415,12 @@ def phase4_terraform(state: dict):
         _tf_plan(tf_dir)
 
         if attempt == 1:
-            confirm = input(f"\n  {yellow('Apply the plan above? [y/N]: ')}").strip().lower()
-            if confirm != "y":
-                die("Terraform apply cancelled")
+            if AUTO_APPROVE:
+                log("INFO", "Auto-approved terraform apply (--yes)")
+            else:
+                confirm = input(f"\n  {yellow('Apply the plan above? [y/N]: ')}").strip().lower()
+                if confirm != "y":
+                    die("Terraform apply cancelled")
         else:
             log("INFO", f"Auto-retrying after partial failure (attempt {attempt}/{MAX_ATTEMPTS}) …")
 
@@ -1590,8 +1671,12 @@ def phase7_argocd(state: dict):
     if not _le_email:
         _le_email = capture("gh api user --jq .email", check=False).strip()
     if not _le_email:
-        _le_prompt = cyan("Email for Let's Encrypt expiry notices")
-        _le_email = input(f"  {_le_prompt}: ").strip()
+        if AUTO_APPROVE:
+            _le_email = "admin@peerisland.com"
+            log("INFO", f"Auto-approved Let's Encrypt email: {_le_email} (--yes)")
+        else:
+            _le_prompt = cyan("Email for Let's Encrypt expiry notices")
+            _le_email = input(f"  {_le_prompt}: ").strip()
     if _le_email:
         state["data"]["letsencrypt_email"] = _le_email
         save_state(state)
@@ -3969,6 +4054,611 @@ def _ensure_tools_on_path():
                         pass
 
 
+# ═════════════════════════════════════════════════════════════════════════════
+#  DESTROY — tear down everything in Azure + cluster
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _confirm_destroy(dry_run: bool) -> bool:
+    """Double-confirmation gate. Returns True only when the user types the magic word."""
+    if dry_run:
+        log("INFO", "dry-run: skipping confirmation")
+        return True
+    print()
+    print(red("  ██████████████████████████████████████████████████"))
+    print(red("  ██                                              ██"))
+    print(red("  ██   WARNING — THIS WILL DELETE EVERYTHING      ██"))
+    print(red("  ██                                              ██"))
+    print(red("  ██   • AKS cluster + all workloads              ██"))
+    print(red("  ██   • ACR + all images                         ██"))
+    print(red("  ██   • Key Vault + all secrets                  ██"))
+    print(red("  ██   • VNet, NSGs, subnets                      ██"))
+    print(red("  ██   • Resource group (peerisland-prod-rg)      ██"))
+    print(red("  ██   • Terraform remote state storage           ██"))
+    print(red("  ██                                              ██"))
+    print(red("  ██   This action is IRREVERSIBLE.               ██"))
+    print(red("  ██████████████████████████████████████████████████"))
+    print()
+    if AUTO_APPROVE:
+        print(f"  {yellow('Auto-approved destroy (--yes)')}")
+        return True
+    answer = input(f"  Type {bold('destroy')} to confirm, or anything else to abort: ").strip()
+    if answer != "destroy":
+        print(f"\n  {green('Aborted — nothing was deleted.')}")
+        return False
+    return True
+
+
+def _dstep(n: int, total: int, title: str):
+    """Print a numbered destroy sub-step header."""
+    print(f"\n  {red('▶')} {bold(f'{n}/{total}')}  {title}")
+    _fh().write(f"\n[DESTROY {n}/{total}] {title}\n")
+
+
+def _dlog(symbol: str, msg: str, color=None):
+    """Inline destroy log — indented under the current step."""
+    ts   = datetime.now().strftime("%H:%M:%S")
+    clr  = color or DIM
+    line = f"      {_c(clr, symbol)}  {msg}"
+    print(line)
+    _fh().write(f"{ts}  {symbol}  {msg}\n")
+    _fh().flush()
+
+
+def _drun(cmd: str, *, capture: bool = False, dry_run: bool = False):
+    """Run a shell command during destroy, stream stderr live, return CompletedProcess."""
+    _dlog("$", cyan(cmd))
+    if dry_run:
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+    proc = subprocess.Popen(
+        cmd, shell=True,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, encoding="utf-8", errors="replace",
+    )
+    lines = []
+    for raw in proc.stdout:
+        raw = raw.rstrip()
+        if raw.strip():
+            _dlog(" ", dim(raw))
+        lines.append(raw)
+        _fh().write(raw + "\n")
+    proc.wait()
+    return subprocess.CompletedProcess(cmd, proc.returncode, stdout="\n".join(lines))
+
+
+def _destroy_k8s_finalizers(dry_run: bool):
+    """Remove ArgoCD Application finalizers so namespace deletion doesn't hang."""
+    _dlog("·", "Listing ArgoCD Applications …")
+    r = subprocess.run("kubectl get applications -n argocd --no-headers -o custom-columns=NAME:.metadata.name",
+                       shell=True, capture_output=True, text=True)
+    apps = [l.strip() for l in r.stdout.splitlines() if l.strip()]
+    if apps:
+        _dlog("·", f"Found {len(apps)} Application(s): {', '.join(apps)}")
+        for app in apps:
+            _dlog("·", f"  Removing finalizers from Application/{app}")
+            if not dry_run:
+                subprocess.run(
+                    f"kubectl patch application {app} -n argocd "
+                    f"-p '{{\"metadata\":{{\"finalizers\":[]}}}}' --type=merge",
+                    shell=True, capture_output=True,
+                )
+        _dlog("·", "Deleting all Applications …")
+        if not dry_run:
+            subprocess.run("kubectl delete applications --all -n argocd --ignore-not-found",
+                           shell=True, capture_output=True)
+    else:
+        _dlog("·", "No ArgoCD Applications found")
+
+
+def _destroy_helm_releases(dry_run: bool):
+    """Uninstall Helm releases in reverse dependency order."""
+    releases = [
+        ("argocd",             "argocd"),
+        ("grafana",            "monitoring"),
+        ("alloy",              "monitoring"),
+        ("loki",               "monitoring"),
+        ("tempo",              "monitoring"),
+        ("mimir",              "monitoring"),
+        ("prometheus-adapter", "monitoring"),
+        ("argo-rollouts",      "argo-rollouts"),
+        ("cert-manager",       "cert-manager"),
+        ("ingress-nginx",      "ingress-nginx"),
+    ]
+    for name, ns in releases:
+        chk = subprocess.run(f"helm status {name} -n {ns} -o json",
+                             shell=True, capture_output=True, text=True)
+        if chk.returncode != 0:
+            _dlog("·", f"  {dim(name)} ({ns})  not installed — skip")
+            continue
+        # Parse status from JSON
+        try:
+            status = json.loads(chk.stdout).get("info", {}).get("status", "?")
+        except Exception:
+            status = "?"
+        _dlog("·", f"  Uninstalling {bold(name)} (ns={ns}, status={status}) …")
+        t0 = time.time()
+        r = _drun(f"helm uninstall {name} -n {ns} --wait --timeout 5m", dry_run=dry_run)
+        elapsed = int(time.time() - t0)
+        if r.returncode == 0:
+            _dlog("✓", f"  {green(name)} uninstalled ({elapsed}s)", GREEN)
+        else:
+            _dlog("!", f"  {yellow(name)} uninstall returned exit {r.returncode} — continuing", YELLOW)
+
+
+def _destroy_pvcs(dry_run: bool):
+    """Force-delete any remaining PVCs so PVs are released before the cluster is gone."""
+    r = subprocess.run(
+        "kubectl get pvc --all-namespaces --no-headers -o custom-columns="
+        "NS:.metadata.namespace,NAME:.metadata.name,STATUS:.status.phase,SC:.spec.storageClassName",
+        shell=True, capture_output=True, text=True,
+    )
+    rows = [l for l in r.stdout.splitlines() if l.strip()]
+    if not rows:
+        _dlog("·", "No PVCs found")
+        return
+    _dlog("·", f"Found {len(rows)} PVC(s):")
+    for row in rows:
+        parts = row.split()
+        ns, name = parts[0], parts[1]
+        status = parts[2] if len(parts) > 2 else "?"
+        _dlog("·", f"    {ns}/{name}  [{status}]")
+        if not dry_run:
+            subprocess.run(f"kubectl delete pvc {name} -n {ns} --ignore-not-found",
+                           shell=True, capture_output=True)
+    _dlog("✓", f"PVCs deleted", GREEN)
+
+
+def _destroy_namespaces(dry_run: bool):
+    """Delete application namespaces and report which ones existed."""
+    ns_list = ["peerisland", "monitoring", "argocd", "argo-rollouts",
+               "cert-manager", "ingress-nginx"]
+    # Find which actually exist
+    r = subprocess.run("kubectl get namespaces --no-headers -o custom-columns=NAME:.metadata.name",
+                       shell=True, capture_output=True, text=True)
+    existing = set(r.stdout.splitlines())
+    for ns in ns_list:
+        if ns in existing:
+            _dlog("·", f"  Deleting namespace: {bold(ns)}")
+            if not dry_run:
+                r2 = _drun(f"kubectl delete namespace {ns} --ignore-not-found --timeout=90s",
+                           dry_run=dry_run)
+                if r2.returncode == 0:
+                    _dlog("✓", f"  {green(ns)} deleted", GREEN)
+                else:
+                    _dlog("!", f"  {yellow(ns)} timed out — Terraform will remove it with the cluster", YELLOW)
+        else:
+            _dlog("·", f"  {dim(ns)}  not present — skip")
+
+
+def _destroy_terraform(state: dict, dry_run: bool):
+    """Run terraform destroy, streaming every resource deletion live."""
+    tf_dir      = REPO_ROOT / "terraform"
+    tf_boot_dir = REPO_ROOT / "terraform" / "bootstrap"
+
+    tf_bin = shutil.which("terraform")
+    if not tf_bin:
+        _dlog("!", "terraform not on PATH — skipping terraform destroy, falling back to az group delete", YELLOW)
+
+    if tf_bin and ((tf_dir / "terraform.tfvars").exists() or (tf_dir / ".terraform").exists()):
+        _dlog("·", "terraform init …")
+        if not dry_run:
+            subprocess.run("terraform init -upgrade -no-color", shell=True, cwd=str(tf_dir),
+                           capture_output=True)
+
+        _dlog("·", "terraform destroy -auto-approve (streaming output) …")
+        if not dry_run:
+            # Stream JSON output so we log every resource destroy event
+            proc = subprocess.Popen(
+                "terraform destroy -auto-approve -json -no-color",
+                shell=True, cwd=str(tf_dir),
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, encoding="utf-8", errors="replace",
+            )
+            destroyed, errored = [], []
+            for raw in proc.stdout:
+                raw = raw.rstrip()
+                _fh().write(raw + "\n")
+                try:
+                    msg  = json.loads(raw)
+                    mtype = msg.get("type", "")
+                    hook  = msg.get("hook", {}) or {}
+                    res   = hook.get("resource", {}) or {}
+                    addr  = res.get("addr", "")
+                    action = hook.get("action", "")
+                    elapsed = int(hook.get("elapsed_seconds", 0))
+
+                    if mtype == "apply_start" and action == "delete":
+                        _dlog("·", f"  {red('–')} destroying  {addr}")
+                    elif mtype == "apply_complete" and action == "delete":
+                        destroyed.append(addr)
+                        _dlog("✓", f"  {green('–')} destroyed   {addr}  ({elapsed}s)", GREEN)
+                    elif mtype == "apply_errored":
+                        errored.append(addr)
+                        _dlog("!", f"  {red('✗')} failed      {addr}", RED)
+                    elif mtype == "diagnostic":
+                        diag   = msg.get("diagnostic", {}) or {}
+                        detail = diag.get("detail") or diag.get("summary") or msg.get("@message", "")
+                        level  = msg.get("@level", "info")
+                        if level == "error":
+                            _dlog("!", f"  {red(detail[:200])}", RED)
+                        elif level == "warning":
+                            _dlog("!", f"  {yellow(detail[:200])}", YELLOW)
+                    elif mtype == "change_summary":
+                        chg = msg.get("changes", {})
+                        _dlog("·", f"  Summary: {chg.get('remove',0)} destroyed, "
+                                   f"{chg.get('add',0)} added, {chg.get('change',0)} changed")
+                    elif msg.get("@message") and mtype not in ("version",):
+                        txt = msg["@message"]
+                        if txt.strip():
+                            _dlog(" ", dim(txt[:200]))
+                except json.JSONDecodeError:
+                    if raw.strip():
+                        _dlog(" ", dim(raw[:200]))
+
+            proc.wait()
+            _dlog("·", f"  {len(destroyed)} resource(s) destroyed, {len(errored)} error(s)")
+            if proc.returncode != 0:
+                _dlog("!", f"terraform destroy exited {proc.returncode} — check Azure Portal for leftovers", YELLOW)
+        else:
+            _dlog("$", cyan("terraform destroy -auto-approve -json  (dry-run)"))
+    else:
+        reason = "terraform not on PATH" if not tf_bin else "no terraform state found"
+        _dlog("!", f"{reason} — falling back to az group delete", YELLOW)
+        prefix = _resource_prefix(state)
+        rg = state["data"].get("aks_resource_group", f"{prefix}-rg")
+        _dlog("·", f"az group delete {rg} --yes --no-wait")
+        if not dry_run:
+            subprocess.run(f"az group delete --name {rg} --yes --no-wait", shell=True)
+            _dlog("✓", f"Resource group deletion triggered: {rg}  (running in background)", GREEN)
+
+    # tfstate SA/RG intentionally NOT deleted here — Terraform needs the
+    # remote backend alive for the duration of `terraform destroy`.
+    # _destroy_tfstate_backend() is called as the very last step in destroy().
+
+
+def _destroy_aad_objects(state: dict, dry_run: bool):
+    """Delete the CI/CD service principal + federated credentials created by Terraform."""
+    client_id, _ = _tf_cicd_app_ids()
+    prefix = _resource_prefix(state)
+
+    if not client_id and not dry_run:
+        _dlog("·", f"Looking up AAD app by display name: {prefix}-cicd")
+        r = subprocess.run(
+            f"az ad app list --display-name {prefix}-cicd --query \"[].appId\" -o tsv",
+            shell=True, capture_output=True, text=True,
+        )
+        ids = [l.strip() for l in r.stdout.splitlines() if l.strip()]
+        client_id = ids[0] if ids else ""
+
+    if client_id:
+        _dlog("·", f"Deleting AAD application (client_id={client_id}) …")
+        if not dry_run:
+            r = _drun(f"az ad app delete --id {client_id}", dry_run=dry_run)
+            if r.returncode == 0:
+                _dlog("✓", f"AAD application deleted", GREEN)
+            else:
+                _dlog("!", f"az ad app delete returned {r.returncode}", YELLOW)
+    else:
+        _dlog("·", "AAD application not found — may already be deleted or not yet created")
+
+    # Delete AAD admin group
+    group_name = f"{prefix}-aks-admins"
+    _dlog("·", f"Looking up AAD group: {group_name}")
+    if not dry_run:
+        r = subprocess.run(
+            f"az ad group list --display-name {group_name} --query \"[].id\" -o tsv",
+            shell=True, capture_output=True, text=True,
+        )
+        for gid in [l.strip() for l in r.stdout.splitlines() if l.strip()]:
+            _dlog("·", f"  Deleting group {group_name} ({gid[:8]}…)")
+            rg = _drun(f"az ad group delete --group {gid}", dry_run=dry_run)
+            if rg.returncode == 0:
+                _dlog("✓", f"  AAD group deleted", GREEN)
+
+
+def _destroy_tfstate_backend(state: dict, dry_run: bool):
+    """Delete the tfstate storage account and bootstrap resource group — always last.
+
+    The remote backend must remain alive while `terraform destroy` runs (step 2).
+    Only safe to remove after all Terraform operations are complete.
+    """
+    tfstate_rg = state["data"].get("tf_state_rg", "peerisland-tfstate-rg")
+    tfstate_sa = state["data"].get("tf_state_sa", "")
+
+    # If we don't have the SA name in state, try to find it in Azure
+    if not tfstate_sa and not dry_run:
+        _dlog("·", f"Looking up tfstate storage account in {tfstate_rg} …")
+        r = subprocess.run(
+            f"az storage account list -g {tfstate_rg} --query \"[].name\" -o tsv",
+            shell=True, capture_output=True, text=True,
+        )
+        accounts = [l.strip() for l in r.stdout.splitlines() if l.strip()]
+        if accounts:
+            tfstate_sa = accounts[0]
+            _dlog("·", f"Found: {tfstate_sa}")
+
+    if tfstate_sa:
+        _dlog("·", f"Deleting tfstate storage account: {bold(tfstate_sa)}")
+        if not dry_run:
+            r = _drun(
+                f"az storage account delete --name {tfstate_sa} "
+                f"--resource-group {tfstate_rg} --yes",
+                dry_run=dry_run,
+            )
+            if r.returncode == 0:
+                _dlog("✓", f"Storage account {tfstate_sa} deleted", GREEN)
+            else:
+                _dlog("!", f"Storage account delete returned {r.returncode} — "
+                           f"deleting the resource group will remove it anyway", YELLOW)
+        else:
+            _dlog("$", cyan(f"az storage account delete --name {tfstate_sa} "
+                            f"--resource-group {tfstate_rg} --yes  (dry-run)"))
+
+    _dlog("·", f"Deleting tfstate resource group: {bold(tfstate_rg)}")
+    if not dry_run:
+        r = _drun(f"az group delete --name {tfstate_rg} --yes --no-wait", dry_run=dry_run)
+        if r.returncode == 0:
+            _dlog("✓", f"tfstate resource group deletion triggered (runs in background)", GREEN)
+        else:
+            _dlog("!", f"az group delete returned {r.returncode} — "
+                       f"check Azure Portal for resource group: {tfstate_rg}", YELLOW)
+    else:
+        _dlog("$", cyan(f"az group delete --name {tfstate_rg} --yes --no-wait  (dry-run)"))
+
+
+def _destroy_local_state(dry_run: bool):
+    """Remove local bootstrap artefacts and Terraform cache."""
+    global _log_fh
+
+    files = [
+        STATE_FILE,
+        REPO_ROOT / "bootstrap-summary.txt",
+        REPO_ROOT / "bootstrap.log",
+    ]
+    for f in files:
+        if f.exists():
+            _dlog("·", f"Removing {f.name}")
+            if not dry_run:
+                # Close the log file handle before attempting to delete bootstrap.log
+                # — Windows holds an exclusive lock on open files (WinError 32).
+                if f == LOG_FILE and _log_fh is not None:
+                    try:
+                        _log_fh.flush()
+                        _log_fh.close()
+                    except Exception:
+                        pass
+                    _log_fh = None
+                try:
+                    f.unlink(missing_ok=True)
+                    print(f"      {_c(GREEN, '✓')}  {f.name} removed")
+                except PermissionError as e:
+                    print(f"      {_c(YELLOW, '!')}  {f.name} could not be removed: {e}")
+        else:
+            _dlog("·", f"{f.name}  not found — skip")
+
+    # Reset providers.tf backend SA name to placeholder so the next bootstrap
+    # can patch it with the newly-created storage account name.
+    providers_tf = REPO_ROOT / "terraform" / "providers.tf"
+    if providers_tf.exists():
+        import re as _re
+        pf = providers_tf.read_text(encoding="utf-8")
+        reset = _re.sub(
+            r'(storage_account_name\s*=\s*")[^"]*(")',
+            r'\g<1>REPLACE_WITH_BOOTSTRAP_OUTPUT\g<2>',
+            pf,
+        )
+        if reset != pf:
+            _dlog("·", "Resetting providers.tf backend SA name → placeholder")
+            if not dry_run:
+                providers_tf.write_text(reset, encoding="utf-8")
+                _dlog("✓", "providers.tf reset", GREEN)
+        else:
+            _dlog("·", "providers.tf already has placeholder — skip")
+
+    for tf_subdir in [REPO_ROOT / "terraform", REPO_ROOT / "terraform" / "bootstrap"]:
+        for entry in [".terraform", ".terraform.lock.hcl", "tfplan", "tfplan_boot"]:
+            p = tf_subdir / entry
+            if p.exists():
+                rel = str(p.relative_to(REPO_ROOT))
+                _dlog("·", f"Removing {rel}")
+                if not dry_run:
+                    if p.is_dir():
+                        shutil.rmtree(p, ignore_errors=True)
+                    else:
+                        p.unlink(missing_ok=True)
+                    _dlog("✓", f"{rel} removed", GREEN)
+            else:
+                _dlog("·", f"{entry} in {tf_subdir.name}/  not found — skip")
+
+
+def _destroy_tools(dry_run: bool):
+    """Uninstall tools that bootstrap auto-installed.
+
+    - Deletes the peerisland-tools directory (terraform, kubectl, helm, kubelogin,
+      argocd, kustomize, kubectl-argo-rollouts binaries).
+    - pip-uninstalls azure-cli (installed via pip when az was not on PATH).
+    - gh is uninstalled via winget (GitHub.cli).
+    - git is uninstalled via winget (Git.Git).
+    """
+    # Binary tools directory
+    if _TOOLS_DIR.exists():
+        _dlog("·", f"Removing tools directory: {_TOOLS_DIR}")
+        if not dry_run:
+            try:
+                shutil.rmtree(_TOOLS_DIR, ignore_errors=True)
+                _dlog("✓", f"Removed {_TOOLS_DIR}", GREEN)
+            except Exception as e:
+                _dlog("!", f"Could not remove tools dir: {e}", YELLOW)
+    else:
+        _dlog("·", f"Tools directory not found — skip ({_TOOLS_DIR})")
+
+    # azure-cli (pip-installed)
+    az_path = shutil.which("az")
+    pip_installed = az_path and "Scripts" in str(az_path)
+    if pip_installed or not dry_run:
+        _dlog("·", "pip uninstall azure-cli")
+        if not dry_run:
+            r = subprocess.run(
+                [sys.executable, "-m", "pip", "uninstall", "-y", "azure-cli"],
+                capture_output=True, text=True,
+            )
+            if r.returncode == 0:
+                _dlog("✓", "azure-cli uninstalled", GREEN)
+            else:
+                # Not installed via pip or already gone — not an error
+                _dlog("·", "azure-cli not pip-installed (system install) — skip")
+        else:
+            _dlog("$", cyan(f"{sys.executable} -m pip uninstall -y azure-cli  (dry-run)"))
+
+    def _winget_uninstall(pkg_id: str, label: str):
+        """Uninstall a winget package, finding winget even when it's not on PATH."""
+        # winget lives in WindowsApps which is on PATH only in interactive shells
+        winget = shutil.which("winget") or str(
+            Path(os.environ.get("LOCALAPPDATA", "")) /
+            "Microsoft" / "WindowsApps" / "winget.exe"
+        )
+        if not Path(winget).exists():
+            _dlog("!", f"winget not found — cannot uninstall {label}", YELLOW)
+            return
+        cmd = [winget, "uninstall", "--id", pkg_id,
+               "--silent", "--accept-source-agreements", "--disable-interactivity"]
+        _dlog("·", f"Uninstalling {label}  ({pkg_id})")
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        out = (r.stdout + r.stderr).strip()
+        if r.returncode == 0:
+            _dlog("✓", f"{label} uninstalled", GREEN)
+        elif "No installed package found" in out or "No package found" in out:
+            _dlog("·", f"{label} not found via winget — already removed or installed differently")
+        else:
+            _dlog("!", f"{label} uninstall failed (rc={r.returncode}): {out[:200]}", YELLOW)
+
+    # gh CLI
+    if not dry_run:
+        _winget_uninstall("GitHub.cli", "gh")
+    else:
+        _dlog("$", cyan("winget uninstall --id GitHub.cli --silent  (dry-run)"))
+
+    # git
+    if not dry_run:
+        _winget_uninstall("Git.Git", "git")
+    else:
+        _dlog("$", cyan("winget uninstall --id Git.Git --silent  (dry-run)"))
+
+
+def destroy(dry_run: bool = False):
+    """Full teardown: k8s → Terraform → AAD → local files → tfstate backend → tools.
+
+    Order matters:
+      1. k8s workloads / Helm / namespaces  (graceful drain before cluster gone)
+      2. terraform destroy                  (deletes AKS, ACR, VNet, KV — reads tfstate)
+      3. AAD objects                        (SP, group — independent of tfstate)
+      4. Local artefacts                    (state file, cache, log)
+      5. tfstate storage account + RG       (MUST be last — Terraform needs it until step 2 finishes)
+      6. Uninstall auto-installed tools     (terraform, az, kubectl, helm, kubelogin, argocd, kustomize)
+    """
+    global DRY_RUN
+    DRY_RUN = dry_run
+
+    _ensure_tools_on_path()
+    state = load_state()
+
+    if not _confirm_destroy(dry_run):
+        return
+
+    TOTAL = 6
+    bar = "─" * 60
+    print(f"\n{red(bar)}")
+    print(f"{red('  DESTROY')}  — tearing down PeerIsland infrastructure")
+    print(f"{red(bar)}")
+    print(f"  {dim('Order: k8s → Terraform → AAD → local files → tfstate backend → tools')}")
+    print(f"  {dim('Each sub-step is logged below.  Full log → bootstrap.log')}\n")
+
+    # ── Step 1: Kubernetes ───────────────────────────────────────────────────
+    _dstep(1, TOTAL, "Kubernetes — remove workloads, Helm releases, namespaces")
+
+    kubectl_ok = shutil.which("kubectl") is not None
+    if not kubectl_ok:
+        _dlog("!", "kubectl not on PATH — skipping k8s cleanup (cluster will be deleted by Terraform)", YELLOW)
+    else:
+        prefix  = _resource_prefix(state)
+        rg      = state["data"].get("aks_resource_group", f"{prefix}-rg")
+        cluster = state["data"].get("aks_cluster_name",   f"{prefix}-aks")
+
+        _dlog("·", f"Fetching kubeconfig for {cluster} ({rg}) …")
+        if not dry_run:
+            r = subprocess.run(
+                f"az aks get-credentials -g {rg} -n {cluster} --overwrite-existing",
+                shell=True, capture_output=True, text=True,
+            )
+            if r.returncode == 0:
+                _dlog("✓", "kubeconfig fetched", GREEN)
+                subprocess.run("kubelogin convert-kubeconfig -l azurecli",
+                               shell=True, capture_output=True)
+                _dlog("✓", "kubelogin auth conversion done", GREEN)
+
+                # Verify cluster is reachable before spending time on k8s cleanup
+                ping = subprocess.run("kubectl get nodes --request-timeout=10s",
+                                      shell=True, capture_output=True)
+                if ping.returncode != 0:
+                    _dlog("!", "Cluster unreachable — skipping k8s cleanup, Terraform will delete the cluster", YELLOW)
+                else:
+                    nodes_out = subprocess.run(
+                        "kubectl get nodes --no-headers -o custom-columns=NAME:.metadata.name,STATUS:.status.conditions[-1].type",
+                        shell=True, capture_output=True, text=True,
+                    )
+                    for ln in nodes_out.stdout.splitlines():
+                        _dlog("·", f"  node  {ln.strip()}")
+
+                    _dlog("·", "--- ArgoCD Applications ---")
+                    _destroy_k8s_finalizers(dry_run)
+
+                    _dlog("·", "--- Helm releases ---")
+                    _destroy_helm_releases(dry_run)
+
+                    _dlog("·", "--- PersistentVolumeClaims ---")
+                    _destroy_pvcs(dry_run)
+
+                    _dlog("·", "--- Namespaces ---")
+                    _destroy_namespaces(dry_run)
+            else:
+                err = (r.stderr or r.stdout or "").strip()[:200]
+                _dlog("!", f"az aks get-credentials failed: {err}", YELLOW)
+                _dlog("!", "Skipping k8s cleanup — Terraform will delete the cluster", YELLOW)
+
+    # ── Step 2: Terraform ────────────────────────────────────────────────────
+    _dstep(2, TOTAL, "Terraform destroy — AKS, ACR, VNet, Key Vault, Log Analytics …")
+    _destroy_terraform(state, dry_run)
+
+    # ── Step 3: AAD objects ──────────────────────────────────────────────────
+    _dstep(3, TOTAL, "Azure Active Directory — service principal, AAD group")
+    _destroy_aad_objects(state, dry_run)
+
+    # ── Step 4: Local artefacts ──────────────────────────────────────────────
+    _dstep(4, TOTAL, "Local bootstrap artefacts — state, summaries, Terraform cache")
+    _destroy_local_state(dry_run)
+
+    # ── Step 5: tfstate backend (after terraform destroy) ───────────────────
+    # This must come after terraform destroy — Terraform reads from the remote
+    # backend during step 2. Deleting it earlier would leave Azure resources orphaned.
+    _dstep(5, TOTAL, "Terraform state backend — storage account + resource group")
+    _destroy_tfstate_backend(state, dry_run)
+
+    # ── Step 6: Uninstall auto-installed tools ───────────────────────────────
+    _dstep(6, TOTAL, "Uninstall bootstrap tools — terraform, az, kubectl, helm, gh, git …")
+    _destroy_tools(dry_run)
+
+    # ── Done ─────────────────────────────────────────────────────────────────
+    print()
+    print(f"  {green('✓')} {bold('Destroy complete.')}")
+    print(f"  {dim('All Azure resources deleted (or background deletion triggered).')}")
+    print(f"  {dim('Auto-installed tools removed.')}")
+    print(f"  {dim('Git repository and local source files are untouched.')}")
+    print()
+    if not dry_run:
+        print(f"  To reprovision from scratch:")
+        print(f"    {cyan('python bootstrap.py')}")
+    print()
+
+
 def main():
     global DRY_RUN
     # Force UTF-8 everywhere — Windows defaults to cp1252 which crashes on
@@ -3990,6 +4680,10 @@ def main():
                         help="Print commands without executing them")
     parser.add_argument("--reset",   dest="reset",      action="store_true",
                         help="Clear saved state and start over from phase 1")
+    parser.add_argument("--destroy", dest="destroy",    action="store_true",
+                        help="Tear down ALL Azure resources and the cluster (IRREVERSIBLE)")
+    parser.add_argument("--yes", "-y", dest="yes",      action="store_true",
+                        help="Auto-approve all interactive prompts (non-interactive mode)")
     parser.add_argument("--list",     dest="list_phases", action="store_true",
                         help="List all phases and exit")
     parser.add_argument("--diagnose", dest="diagnose",    action="store_true",
@@ -3998,6 +4692,13 @@ def main():
 
     if args.list_phases:
         list_phases()
+        return
+
+    global AUTO_APPROVE
+    AUTO_APPROVE = args.yes
+
+    if args.destroy:
+        destroy(dry_run=args.dry_run)
         return
 
     if args.diagnose:

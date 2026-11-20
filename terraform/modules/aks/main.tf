@@ -1,3 +1,18 @@
+resource "random_string" "system_node_pool_tmp" {
+  length  = 12
+  special = false
+  upper   = false
+  numeric = true
+
+  # Generates a new temporary name when a rotation-triggering attribute changes
+  keepers = {
+    vm_size        = var.system_node_pool_vm_size
+    vnet_subnet_id = var.node_subnet_id
+    os_disk_size   = 128
+    os_disk_type   = "Managed"
+  }
+}
+
 resource "azurerm_kubernetes_cluster" "main" {
   name                = "${var.name_prefix}-aks"
   location            = var.location
@@ -22,6 +37,7 @@ resource "azurerm_kubernetes_cluster" "main" {
   default_node_pool {
     name                         = "system"
     vm_size                      = var.system_node_pool_vm_size
+    temporary_name_for_rotation  = random_string.system_node_pool_tmp.result
     auto_scaling_enabled         = true
     min_count                    = var.node_pool_min_count
     max_count                    = var.node_pool_max_count
@@ -75,6 +91,7 @@ resource "azurerm_kubernetes_cluster" "main" {
     ]
   }
 }
+
 
 resource "azurerm_role_assignment" "aks_acr_pull" {
   principal_id                     = azurerm_kubernetes_cluster.main.kubelet_identity[0].object_id
@@ -138,9 +155,7 @@ data "azurerm_resources" "aks_node_nsgs" {
 }
 
 resource "azurerm_network_security_rule" "aks_allow_http" {
-  for_each = {
-    for nsg in data.azurerm_resources.aks_node_nsgs.resources : nsg.name => nsg
-  }
+  for_each = { "aks_node_nsg" = true }
 
   name                        = "Allow-HTTP-Inbound"
   priority                    = 200
@@ -152,13 +167,11 @@ resource "azurerm_network_security_rule" "aks_allow_http" {
   source_address_prefix       = "Internet"
   destination_address_prefix  = "*"
   resource_group_name         = azurerm_kubernetes_cluster.main.node_resource_group
-  network_security_group_name = each.key
+  network_security_group_name = data.azurerm_resources.aks_node_nsgs.resources[0].name
 }
 
 resource "azurerm_network_security_rule" "aks_allow_https" {
-  for_each = {
-    for nsg in data.azurerm_resources.aks_node_nsgs.resources : nsg.name => nsg
-  }
+  for_each = { "aks_node_nsg" = true }
 
   name                        = "Allow-HTTPS-Inbound"
   priority                    = 201
@@ -170,23 +183,40 @@ resource "azurerm_network_security_rule" "aks_allow_https" {
   source_address_prefix       = "Internet"
   destination_address_prefix  = "*"
   resource_group_name         = azurerm_kubernetes_cluster.main.node_resource_group
-  network_security_group_name = each.key
+  network_security_group_name = data.azurerm_resources.aks_node_nsgs.resources[0].name
+}
+
+
+resource "random_string" "user_node_pool_tmp" {
+  length  = 12
+  special = false
+  upper   = false
+  numeric = true
+
+  # Regenerates a new temporary name when a rotation-triggering attribute changes
+  keepers = {
+    vm_size        = var.node_pool_vm_size
+    vnet_subnet_id = var.node_subnet_id
+    max_pods       = 110
+    os_disk_size   = 128
+    os_disk_type   = "Managed"
+  }
 }
 
 resource "azurerm_kubernetes_cluster_node_pool" "user" {
   name                        = "user"
-  temporary_name_for_rotation = "usertmp"
-  kubernetes_cluster_id = azurerm_kubernetes_cluster.main.id
-  vm_size               = var.node_pool_vm_size
-  auto_scaling_enabled  = true
-  min_count             = var.user_node_pool_min_count
-  max_count             = var.user_node_pool_max_count
-  max_pods              = 110
-  vnet_subnet_id        = var.node_subnet_id
-  os_disk_type          = "Managed"
-  os_disk_size_gb       = 128
-  mode                  = "User"
-  tags                  = var.tags
+  temporary_name_for_rotation = random_string.user_node_pool_tmp.result
+  kubernetes_cluster_id       = azurerm_kubernetes_cluster.main.id
+  vm_size                     = var.node_pool_vm_size
+  auto_scaling_enabled        = true
+  min_count                   = var.user_node_pool_min_count
+  max_count                   = var.user_node_pool_max_count
+  max_pods                    = 110
+  vnet_subnet_id              = var.node_subnet_id
+  os_disk_type                = "Managed"
+  os_disk_size_gb             = 128
+  mode                        = "User"
+  tags                        = var.tags
 
   node_labels = {
     "nodepool-type" = "user"
