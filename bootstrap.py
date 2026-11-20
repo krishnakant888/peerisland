@@ -1530,11 +1530,9 @@ def phase4_terraform(state: dict):
     else:
         log("INFO", "AKS already in state — skipping pass 1")
 
-    # Pass 2: full apply without a plan file.
-    # We skip `terraform plan` because the helm provider reads AKS outputs
-    # (host, CA cert) during plan-time provider init, which fails even when AKS
-    # is already in state.  `terraform apply -auto-approve` bypasses that.
-    # tf_apply(None, ...) uses -auto-approve and retains full import-detection.
+    # Pass 2: full apply.  providers.tf wraps helm provider values in try() so
+    # provider init doesn't fail when AKS outputs are unknown.
+    # tf_apply(None, ...) uses -auto-approve with full import-detection.
     if not AUTO_APPROVE:
         confirm = input(f"\n  {yellow('Apply the full infrastructure? [y/N]: ')}").strip().lower()
         if confirm != "y":

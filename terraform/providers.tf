@@ -24,7 +24,7 @@ terraform {
   # storage_account_name from its output and run: terraform init -reconfigure
   backend "azurerm" {
     resource_group_name  = "peerisland-tfstate-rg"
-    storage_account_name = "peerislandtfjncbl7fq"
+    storage_account_name = "peerislandtf4ej9kfkv"
     container_name       = "tfstate"
     key                  = "peerisland/prod.tfstate"
     use_azuread_auth     = true  # no storage key in environment; uses current AAD identity
@@ -53,8 +53,10 @@ provider "random" {}
 # Azure CLI session, same mechanism bootstrap.py and kubectl use.
 provider "helm" {
   kubernetes {
-    host                   = module.aks.host
-    cluster_ca_certificate = base64decode(module.aks.cluster_ca_certificate)
+    # try() prevents "Invalid provider configuration" on fresh runs where AKS
+    # outputs are unknown at plan/import time — falls back to "" until AKS exists.
+    host                   = try(module.aks.host, "")
+    cluster_ca_certificate = try(base64decode(module.aks.cluster_ca_certificate), "")
     exec {
       api_version = "client.authentication.k8s.io/v1beta1"
       command     = "kubelogin"
