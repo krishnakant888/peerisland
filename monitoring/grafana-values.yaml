@@ -146,6 +146,12 @@ grafana.ini:
   feature_toggles:
     enable: traceqlEditor tempoSearch
 
+serviceAccount:
+  create: true
+  autoMount: true
+  annotations:
+    azure.workload.identity/client-id: "bac5c66c-be80-410d-b860-d9238d14655b"
+
 # Key Vault CSI driver — mounts grafana-admin-{user,password} from KV and syncs to grafana-admin-secret
 # SecretProviderClass is in k8s/monitoring/secret-provider-grafana.yaml
 extraVolumes:
