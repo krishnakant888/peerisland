@@ -2,6 +2,7 @@
 # kube-system components, not competing with application workloads on user nodes.
 # All components are pinned to the system node so they communicate locally
 # (zero cross-node gRPC traffic) and the system node's spare capacity is used.
+
 _systemNode: &systemNode
   nodeSelector:
     kubernetes.azure.com/mode: system
@@ -65,8 +66,19 @@ server:
     enabled: true
     ingressClassName: nginx
     annotations:
-      nginx.ingress.kubernetes.io/ssl-redirect: "false"
+      nginx.ingress.kubernetes.io/ssl-redirect: "true"
+      nginx.ingress.kubernetes.io/ssl-passthrough: "false"
       nginx.ingress.kubernetes.io/backend-protocol: "HTTPS"
+      cert-manager.io/cluster-issuer: "letsencrypt"
+    hosts:
+      - peerisland.centralindia.cloudapp.azure.com
+    paths:
+      - /argocd
+    pathType: Prefix
+    tls:
+      - secretName: argocd-tls
+        hosts:
+          - peerisland.centralindia.cloudapp.azure.com
 
 # ── ApplicationSet Controller ─────────────────────────────────────────────────
 applicationSet:
@@ -100,6 +112,7 @@ redis:
 configs:
   params:
     server.insecure: false
+    server.rootpath: /argocd
   cm:
     users.anonymous.enabled: "false"
     # Required for kustomize overlays that use ../../ path traversal (e.g. peerisland app)
@@ -115,6 +128,26 @@ configs:
     resource.customizations.ignoreDifferences.apiextensions.k8s.io_CustomResourceDefinition: |
       jsonPointers:
         - /spec/conversion/webhook/clientConfig/caBundle
+    resource.customizations.health.apiregistration.k8s.io_APIService: |
+      hs = {}
+      if obj.status ~= nil then
+        for i, condition in ipairs(obj.status.conditions or {}) do
+          if condition.type == "Available" then
+            if condition.status == "True" then
+              hs.status = "Healthy"
+              hs.message = condition.message
+              return hs
+            else
+              hs.status = "Degraded"
+              hs.message = condition.message
+              return hs
+            end
+          end
+        end
+      end
+      hs.status = "Progressing"
+      hs.message = "Waiting for APIService to become available"
+      return hs
 
   rbac:
     policy.default: role:readonly
