@@ -164,3 +164,21 @@ resource "azurerm_role_assignment" "cicd_acr_push" {
   role_definition_name = "AcrPush"
   principal_id         = azuread_service_principal.cicd.object_id
 }
+
+# ── Grafana credentials in Key Vault ─────────────────────────────────────────
+# Source of truth: terraform.tfvars → Key Vault → k8s secret → Grafana helm
+resource "azurerm_key_vault_secret" "grafana_admin_user" {
+  name         = "grafana-admin-user"
+  value        = var.grafana_admin_user
+  key_vault_id = module.keyvault.id
+
+  depends_on = [module.keyvault]
+}
+
+resource "azurerm_key_vault_secret" "grafana_admin_password" {
+  name         = "grafana-admin-password"
+  value        = var.grafana_admin_password
+  key_vault_id = module.keyvault.id
+
+  depends_on = [module.keyvault]
+}

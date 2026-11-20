@@ -1715,28 +1715,20 @@ def phase6_keyvault(state: dict):
     ).splitlines())
 
     # The 5 real secrets this platform needs
-    # grafana-admin-user is always "admin"; grafana-admin-password is auto-generated
-    # and stored in Key Vault — never prompt for either.
-    import secrets as _sec, string as _str
-    for _gname, _gval in [
-        ("grafana-admin-user",     "admin"),
-        ("grafana-admin-password", None),   # None → auto-generate below
-    ]:
-        if _gname not in _existing_kv:
-            if _gval is None:
-                _gval = "".join(
-                    _sec.choice(_str.ascii_letters + _str.digits + "!@#$%^&*")
-                    for _ in range(32)
-                )
-                log("INFO", f"Auto-generated {_gname} (32 chars)")
-            escaped = _gval.replace('"', '\\"')
-            run(f'az keyvault secret set --vault-name {kv} --name {_gname} --value "{escaped}"')
-            if _gname == "grafana-admin-password":
-                state["data"]["grafana_password"] = _gval
-            if _gname == "grafana-admin-user":
-                state["data"]["grafana_user"] = _gval
-        else:
-            log("OK", f"{_gname} already in Key Vault — skipping")
+    # grafana-admin-user and grafana-admin-password are managed by Terraform
+    # (terraform.tfvars → Key Vault via azurerm_key_vault_secret).  Just read
+    # them from Key Vault here and cache in state for phase 11 summary.
+    for _gname, _skey in [("grafana-admin-user", "grafana_user"), ("grafana-admin-password", "grafana_password")]:
+        if not state["data"].get(_skey):
+            _r = subprocess.run(
+                f"az keyvault secret show --vault-name {kv} --name {_gname} --query value -o tsv",
+                shell=True, capture_output=True, text=True, encoding="utf-8",
+            )
+            if _r.returncode == 0 and _r.stdout.strip():
+                state["data"][_skey] = _r.stdout.strip()
+                log("OK", f"{_gname} loaded from Key Vault")
+            else:
+                log("WARN", f"{_gname} not yet in Key Vault — will be created by Terraform apply")
 
     secrets_spec = [
         ("grafana-slack-webhook", "Slack incoming webhook URL",                    True),

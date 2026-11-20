@@ -92,6 +92,19 @@ variable "letsencrypt_email" {
   default     = ""
 }
 
+variable "grafana_admin_user" {
+  description = "Grafana admin username"
+  type        = string
+  default     = "admin"
+}
+
+variable "grafana_admin_password" {
+  description = "Grafana admin password — stored in Key Vault, never in state"
+  type        = string
+  sensitive   = true
+  default     = ""
+}
+
 variable "tags" {
   description = "Common resource tags"
   type        = map(string)
