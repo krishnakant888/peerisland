@@ -1715,9 +1715,30 @@ def phase6_keyvault(state: dict):
     ).splitlines())
 
     # The 5 real secrets this platform needs
+    # grafana-admin-user is always "admin"; grafana-admin-password is auto-generated
+    # and stored in Key Vault — never prompt for either.
+    import secrets as _sec, string as _str
+    for _gname, _gval in [
+        ("grafana-admin-user",     "admin"),
+        ("grafana-admin-password", None),   # None → auto-generate below
+    ]:
+        if _gname not in _existing_kv:
+            if _gval is None:
+                _gval = "".join(
+                    _sec.choice(_str.ascii_letters + _str.digits + "!@#$%^&*")
+                    for _ in range(32)
+                )
+                log("INFO", f"Auto-generated {_gname} (32 chars)")
+            escaped = _gval.replace('"', '\\"')
+            run(f'az keyvault secret set --vault-name {kv} --name {_gname} --value "{escaped}"')
+            if _gname == "grafana-admin-password":
+                state["data"]["grafana_password"] = _gval
+            if _gname == "grafana-admin-user":
+                state["data"]["grafana_user"] = _gval
+        else:
+            log("OK", f"{_gname} already in Key Vault — skipping")
+
     secrets_spec = [
-        ("grafana-admin-user",    "Grafana admin username (e.g. admin)",          False),
-        ("grafana-admin-password","Grafana admin password (min 24 chars)",         True),
         ("grafana-slack-webhook", "Slack incoming webhook URL",                    True),
         ("argocd-github-token",   "GitHub PAT with repo read access (for ArgoCD)", True),
         ("tls-certificate",       "Path to PEM cert file, or leave blank for cert-manager", False),
@@ -1731,7 +1752,7 @@ def phase6_keyvault(state: dict):
         # Resolution order:
         #   1. env var override      (ARGOCD_GITHUB_TOKEN etc.)
         #   2. gh auth token         (argocd-github-token only — reuse authenticated session)
-        #   3. interactive prompt    (last resort)
+        #   3. interactive prompt    (skipped when AUTO_APPROVE)
         env_key = name.upper().replace("-", "_")
         val = os.environ.get(env_key, "").strip()
         if val:
@@ -1743,6 +1764,9 @@ def phase6_keyvault(state: dict):
             else:
                 log("WARN", "gh auth token returned nothing — run 'gh auth login' first")
         if not val:
+            if AUTO_APPROVE:
+                log("INFO", f"Skipped {name} (--yes mode; set env var {env_key} to provide it)")
+                continue
             fn  = getpass.getpass if sensitive else input
             val = fn(f"  {cyan(name)} — {dim(prompt)}: ").strip()
         if not val:
