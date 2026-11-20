@@ -5,7 +5,7 @@ metadata:
   namespace: monitoring
   annotations:
     nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
-    cert-manager.io/cluster-issuer: "buypass"
+    cert-manager.io/cluster-issuer: "zerossl"
 spec:
   ingressClassName: nginx
   tls:
