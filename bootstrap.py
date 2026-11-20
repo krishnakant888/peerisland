@@ -1544,20 +1544,6 @@ def phase4_terraform(state: dict):
     else:
         log("WARN", "AKS not in state yet — skipping kubeconfig write; helm resources will apply in a later attempt")
 
-    # Delete grafana secrets from KV so terraform recreates them from tfvars.
-    # This ensures tfvars is always the source of truth — no stale values.
-    _kv_name = state["data"].get("key_vault_name", "")
-    if _kv_name:
-        for _secret in ("grafana-admin-user", "grafana-admin-password"):
-            subprocess.run(
-                f"az keyvault secret delete --vault-name {_kv_name} --name {_secret}",
-                shell=True, capture_output=True,
-            )
-            subprocess.run(
-                f"az keyvault secret purge --vault-name {_kv_name} --name {_secret}",
-                shell=True, capture_output=True,
-            )
-
     # Pass 2: full apply — helm provider reads kubeconfig from ~/.kube/config.
     if not AUTO_APPROVE:
         confirm = input(f"\n  {yellow('Apply the full infrastructure? [y/N]: ')}").strip().lower()
