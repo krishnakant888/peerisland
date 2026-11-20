@@ -1497,12 +1497,8 @@ def phase4_terraform(state: dict):
     aks_in_state = _in_state("module.aks.azurerm_kubernetes_cluster.main")
     if not aks_in_state:
         log("INFO", "Pass 1 — creating AKS cluster and dependencies …")
-        _tf_plan(tf_dir, plan_file="tfplan_pass1", targets=aks_targets)
-        try:
-            tf_apply("tfplan_pass1", cwd=tf_dir)
-            log("OK", "Pass 1 complete — AKS cluster ready")
-        except SystemExit:
-            log("WARN", "Pass 1 had errors — continuing to full apply anyway")
+        targets_str = " ".join(f"-target={t}" for t in aks_targets)
+        run(f"terraform apply -auto-approve {targets_str}", cwd=tf_dir)
     else:
         log("INFO", "AKS already in state — skipping pass 1")
 
@@ -1528,14 +1524,11 @@ def phase4_terraform(state: dict):
     else:
         log("INFO", "Auto-approved terraform apply (--yes)")
 
-    # Single apply — terraform import blocks in main.tf handle any pre-existing
-    # resources automatically; no retry loop needed.
-    log("INFO", "Applying full infrastructure …")
-    try:
-        tf_apply(None, cwd=tf_dir)
-        log("OK", "Terraform apply complete.")
-    except SystemExit:
-        die("Terraform apply failed — check errors above")
+    # Pass 2: let terraform run to completion — no interference.
+    # Import blocks in main.tf handle pre-existing resources.
+    # run() streams output live and raises on non-zero exit.
+    log("INFO", "Applying full infrastructure — this may take 15-20 min for AKS …")
+    run("terraform apply -auto-approve", cwd=tf_dir)
 
     # Parse outputs
     outs = json.loads(capture("terraform output -json", cwd=tf_dir))
