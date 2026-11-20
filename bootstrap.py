@@ -378,15 +378,16 @@ def _tf_plan(tf_dir: Path, plan_file: str = "tfplan", detailed_exitcode: bool = 
     return 1  # unreachable but satisfies type checker
 
 
-def tf_apply(plan_file: str, cwd: Path) -> list[tuple[str, str]]:
+def tf_apply(plan_file: str | None, cwd: Path) -> list[tuple[str, str]]:
     """Stream terraform apply with live progress display.
 
+    Pass plan_file=None to run with -auto-approve (no plan file needed).
     Returns a list of (tf_addr, azure_resource_id) pairs for resources that
     already exist in Azure but are missing from Terraform state, so the caller
     can import them and retry.  Returns [] on success.  Calls sys.exit(1) on
     any other failure.
     """
-    cmd = f"terraform apply -json {plan_file}"
+    cmd = f"terraform apply -json -auto-approve" if plan_file is None else f"terraform apply -json {plan_file}"
     log("CMD", cyan(cmd))
     _fh().write(f"$ {cmd}\n")
 
@@ -1529,11 +1530,11 @@ def phase4_terraform(state: dict):
     else:
         log("INFO", "AKS already in state — skipping pass 1")
 
-    # Pass 2: full apply using -auto-approve directly.
-    # We deliberately skip `terraform plan` here because the helm provider reads
-    # AKS outputs (host, CA cert) during plan initialization, which fails with
-    # "Invalid provider configuration" even when AKS is already in state.
-    # `terraform apply -auto-approve` skips provider-init-at-plan-time and works.
+    # Pass 2: full apply without a plan file.
+    # We skip `terraform plan` because the helm provider reads AKS outputs
+    # (host, CA cert) during plan-time provider init, which fails even when AKS
+    # is already in state.  `terraform apply -auto-approve` bypasses that.
+    # tf_apply(None, ...) uses -auto-approve and retains full import-detection.
     if not AUTO_APPROVE:
         confirm = input(f"\n  {yellow('Apply the full infrastructure? [y/N]: ')}").strip().lower()
         if confirm != "y":
@@ -1544,22 +1545,33 @@ def phase4_terraform(state: dict):
     MAX_ATTEMPTS = 5
     for attempt in range(1, MAX_ATTEMPTS + 1):
         log("INFO", f"Applying infrastructure (attempt {attempt}/{MAX_ATTEMPTS}) …")
-        log("CMD", cyan("terraform apply -auto-approve"))
-
-        r = subprocess.run(
-            "terraform apply -auto-approve",
-            shell=True, cwd=str(tf_dir), env=os.environ.copy(),
-            capture_output=False,
-        )
-        _fh().write(f"terraform apply -auto-approve → exit {r.returncode}\n")
-        if r.returncode == 0:
-            log("OK", "Terraform apply complete")
+        try:
+            to_import = tf_apply(None, cwd=tf_dir)
+            if to_import:
+                patched = [(a, i) for a, i in to_import if a == "__patched__"]
+                imports = [(a, i) for a, i in to_import if a != "__patched__"]
+                if patched:
+                    log("WARN", "HCL patched — retrying apply …")
+                    if attempt == MAX_ATTEMPTS:
+                        die("Terraform apply failed after max attempts — check errors above")
+                    time.sleep(3)
+                    continue
+                log("WARN", f"Found {len(imports)} resource(s) in Azure not in state — importing …")
+                for tf_addr, azure_id in imports:
+                    log("INFO", f"  terraform import {tf_addr}")
+                    run(f'terraform import "{tf_addr}" "{azure_id}"', cwd=tf_dir, check=False)
+                if attempt == MAX_ATTEMPTS:
+                    die("Terraform apply failed after max attempts — check errors above")
+                log("INFO", "Import done — retrying apply …")
+                time.sleep(3)
+                continue
+            log("OK", "Terraform apply complete.")
             break
-
-        if attempt == MAX_ATTEMPTS:
-            die("Terraform apply failed after max attempts — check errors above")
-        log("INFO", f"Retrying after failure (attempt {attempt}/{MAX_ATTEMPTS}) …")
-        time.sleep(5)
+        except SystemExit:
+            if attempt == MAX_ATTEMPTS:
+                die("Terraform apply failed after max attempts — check errors above")
+            log("WARN", f"Apply failed on attempt {attempt} — retrying …")
+            time.sleep(5)
 
     # Parse outputs
     outs = json.loads(capture("terraform output -json", cwd=tf_dir))
