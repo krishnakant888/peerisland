@@ -303,7 +303,8 @@ def _auto_patch_aks_lifecycle(fields: list[str], tf_dir: Path) -> bool:
     return True
 
 
-def _tf_plan(tf_dir: Path, plan_file: str = "tfplan", detailed_exitcode: bool = False) -> int:
+def _tf_plan(tf_dir: Path, plan_file: str = "tfplan", detailed_exitcode: bool = False,
+             targets: list | None = None) -> int:
     """Run terraform plan with auto-healing for rotation errors and state locks.
 
     Returns:
@@ -314,6 +315,8 @@ def _tf_plan(tf_dir: Path, plan_file: str = "tfplan", detailed_exitcode: bool = 
     flags = f"-out={plan_file}"
     if detailed_exitcode:
         flags += " -detailed-exitcode -lock=false"
+    if targets:
+        flags += " " + " ".join(f"-target={t}" for t in targets)
 
     for attempt in range(1, 5):
         log("CMD", cyan(f"terraform plan {flags}"))
@@ -1500,6 +1503,31 @@ def phase4_terraform(state: dict):
             log("INFO", "Importing existing federated identity credential into Terraform state …")
             run(f'terraform import "azuread_application_federated_identity_credential.github_main" "{import_id}"',
                 cwd=tf_dir, check=False)
+
+    # ── Pass 1: AKS-only targeted apply ──────────────────────────────────────
+    # The helm provider reads AKS outputs (host, CA cert) at plan time.
+    # On a fresh cluster those values are unknown, causing "Invalid provider
+    # configuration". Solution: apply AKS + its dependencies first so the
+    # outputs exist before the full plan runs.
+    aks_targets = [
+        "module.networking",
+        "module.acr",
+        "module.keyvault",
+        "azurerm_resource_group.main",
+        "azurerm_log_analytics_workspace.main",
+        "module.aks",
+    ]
+    aks_in_state = _in_state("module.aks.azurerm_kubernetes_cluster.main")
+    if not aks_in_state:
+        log("INFO", "Pass 1 — creating AKS cluster and dependencies (helm provider needs these first) …")
+        _tf_plan(tf_dir, plan_file="tfplan_pass1", targets=aks_targets)
+        try:
+            tf_apply("tfplan_pass1", cwd=tf_dir)
+            log("OK", "Pass 1 complete — AKS cluster ready")
+        except SystemExit:
+            log("WARN", "Pass 1 had errors — continuing to full apply anyway")
+    else:
+        log("INFO", "AKS already in state — skipping pass 1")
 
     MAX_ATTEMPTS = 5
     for attempt in range(1, MAX_ATTEMPTS + 1):
