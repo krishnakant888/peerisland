@@ -1,0 +1,31 @@
+fullnameOverride: node-exporter
+
+# Run on every node including system node pool
+tolerations:
+  - effect: NoSchedule
+    operator: Exists
+  - effect: NoExecute
+    operator: Exists
+
+# Host network/PID for real OS-level metrics
+hostNetwork: true
+hostPID: true
+hostRootFsMount:
+  enabled: true
+  mountPropagation: HostToContainer
+
+service:
+  port: 9100
+  targetPort: 9100
+
+# Already scraped by Alloy via node discovery — no annotation-based scrape needed
+podAnnotations:
+  prometheus.io/scrape: "false"
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 200m
+    memory: 128Mi

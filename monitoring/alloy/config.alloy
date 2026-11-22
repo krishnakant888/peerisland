@@ -227,6 +227,69 @@ prometheus.relabel "kubelet_keep" {
   forward_to = [prometheus.remote_write.mimir.receiver]
 }
 
+// ── Node Exporter (host-level CPU/memory/disk/network) ───────────────────────
+// node-exporter DaemonSet runs with hostNetwork; scrape via node internal IP:9100
+
+discovery.relabel "node_exporter" {
+  targets = discovery.kubernetes.nodes.targets
+  rule {
+    // Replace the default kubelet port with node-exporter's port
+    source_labels = ["__address__"]
+    regex         = "([^:]+)(:\\d+)?"
+    replacement   = "$1:9100"
+    target_label  = "__address__"
+  }
+  rule {
+    source_labels = ["__meta_kubernetes_node_name"]
+    target_label  = "node"
+  }
+  rule {
+    replacement  = "node-exporter"
+    target_label = "job"
+  }
+}
+
+prometheus.scrape "node_exporter" {
+  scrape_interval = "30s"
+  targets         = discovery.relabel.node_exporter.output
+  job_name        = "node-exporter"
+  forward_to      = [prometheus.remote_write.mimir.receiver]
+}
+
+// ── kube-state-metrics ───────────────────────────────────────────────────────
+
+discovery.kubernetes "ksm_service" {
+  role = "service"
+  namespaces {
+    names = ["monitoring"]
+  }
+}
+
+discovery.relabel "kube_state_metrics" {
+  targets = discovery.kubernetes.ksm_service.targets
+  rule {
+    source_labels = ["__meta_kubernetes_service_label_app_kubernetes_io_name"]
+    regex         = "kube-state-metrics"
+    action        = "keep"
+  }
+  rule {
+    source_labels = ["__meta_kubernetes_namespace"]
+    target_label  = "namespace"
+  }
+  rule {
+    replacement  = "kube-state-metrics"
+    target_label = "job"
+  }
+}
+
+prometheus.scrape "kube_state_metrics" {
+  scrape_interval = "30s"
+  honor_labels    = true
+  targets         = discovery.relabel.kube_state_metrics.output
+  job_name        = "kube-state-metrics"
+  forward_to      = [prometheus.remote_write.mimir.receiver]
+}
+
 // ── API server metrics (filtered) ────────────────────────────────────────────
 
 prometheus.scrape "apiserver" {

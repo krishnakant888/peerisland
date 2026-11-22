@@ -1,0 +1,33 @@
+fullnameOverride: kube-state-metrics
+
+replicas: 1
+
+# Expose a named port "http-metrics" so Alloy's named_metrics_port scraper picks it up
+service:
+  port: 8080
+  targetPort: 8080
+
+# Resources that the dashboards actually query — keep cardinality low
+collectors:
+  - deployments
+  - daemonsets
+  - statefulsets
+  - replicasets
+  - pods
+  - nodes
+  - horizontalpodautoscalers
+  - persistentvolumeclaims
+  - namespaces
+  - services
+  - endpoints
+
+podAnnotations:
+  prometheus.io/scrape: "false"   # Alloy uses service discovery, not annotation scrape
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 128Mi
+  limits:
+    cpu: 200m
+    memory: 256Mi
