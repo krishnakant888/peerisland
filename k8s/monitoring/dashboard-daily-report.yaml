@@ -352,9 +352,9 @@ data:
               {"matcher": {"id": "byName", "options": "warn"}, "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "yellow"}}]},
               {"matcher": {"id": "byName", "options": "info"}, "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "blue"}}]}]},
           "targets": [
-            {"expr": "sum(rate({namespace=\"peerisland\", level=\"error\"}[5m]))", "legendFormat": "error", "refId": "A"},
-            {"expr": "sum(rate({namespace=\"peerisland\", level=\"warn\"}[5m]))", "legendFormat": "warn", "refId": "B"},
-            {"expr": "sum(rate({namespace=\"peerisland\", level=\"info\"}[5m]))", "legendFormat": "info", "refId": "C"}]},
+            {"expr": "sum(rate({namespace=\"peerisland\", level=~\"(?i)error\"}[5m]))", "legendFormat": "error", "refId": "A"},
+            {"expr": "sum(rate({namespace=\"peerisland\", level=~\"(?i)warn\"}[5m]))", "legendFormat": "warn", "refId": "B"},
+            {"expr": "sum(rate({namespace=\"peerisland\", level=~\"(?i)info\"}[5m]))", "legendFormat": "info", "refId": "C"}]},
 
         {"id": 82, "type": "timeseries", "title": "Error Log Rate by Service",
           "gridPos": {"x": 12, "y": 94, "w": 12, "h": 7},
@@ -362,13 +362,13 @@ data:
           "options": {"tooltip": {"mode": "multi"}, "legend": {"displayMode": "table", "placement": "bottom", "calcs": ["sum", "max"]}},
           "fieldConfig": {"defaults": {"unit": "short"}},
           "targets": [
-            {"expr": "sum by(service) (rate({namespace=\"peerisland\", level=\"error\"}[5m]))", "legendFormat": "{{service}}", "refId": "A"}]},
+            {"expr": "sum by(service) (rate({namespace=\"peerisland\", level=~\"(?i)error\"}[5m]))", "legendFormat": "{{service}}", "refId": "A"}]},
 
         {"id": 83, "type": "logs", "title": "Recent Error Logs (backend + frontend)",
           "gridPos": {"x": 0, "y": 101, "w": 24, "h": 10},
           "datasource": {"type": "loki", "uid": "loki"},
           "options": {"dedupStrategy": "none", "showLabels": true, "showTime": true, "sortOrder": "Descending", "wrapLogMessage": false},
-          "targets": [{"expr": "{namespace=\"peerisland\", level=\"error\"}", "refId": "A"}]},
+          "targets": [{"expr": "{namespace=\"peerisland\", level=~\"(?i)error\"}", "refId": "A"}]},
 
         {"id": 90, "type": "row", "title": "Automated Daily Report Log", "gridPos": {"x": 0, "y": 111, "w": 24, "h": 1}, "collapsed": false},
 

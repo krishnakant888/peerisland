@@ -388,6 +388,10 @@ loki.process "pods" {
     stage.json {
       expressions = {level = "level", trace_id = "traceId"}
     }
+    stage.template {
+      source   = "level"
+      template = "{{ if eq (lower .Value) \"warning\" }}warn{{ else if eq (lower .Value) \"critical\" }}fatal{{ else }}{{ lower .Value }}{{ end }}"
+    }
     stage.labels {
       values = {level = "level", traceId = "trace_id"}
     }
