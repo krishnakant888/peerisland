@@ -24,6 +24,15 @@ collectors:
 podAnnotations:
   prometheus.io/scrape: "false"   # Alloy uses service discovery, not annotation scrape
 
+# chart 5.27.0 defaults to seccompProfile:RuntimeDefault which is not supported
+# on all AKS node pools and causes an immediate crash (exit code 2).
+# Keep user/group hardening but omit the seccomp profile.
+podSecurityContext:
+  fsGroup: 65534
+  runAsGroup: 65534
+  runAsNonRoot: true
+  runAsUser: 65534
+
 resources:
   requests:
     cpu: 50m
