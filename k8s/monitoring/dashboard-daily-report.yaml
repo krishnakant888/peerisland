@@ -1,0 +1,381 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dashboard-daily-report
+  namespace: monitoring
+  labels:
+    grafana_dashboard: "1"
+  annotations:
+    grafana_folder: PeerIsland
+data:
+  daily-report.json: |
+    {
+      "uid": "peerisland-daily-report",
+      "title": "PeerIsland Daily Report",
+      "tags": ["peerisland", "daily", "report"],
+      "schemaVersion": 39,
+      "version": 1,
+      "refresh": "5m",
+      "time": {"from": "now-24h", "to": "now"},
+      "timepicker": {"refresh_intervals": ["5m", "15m", "1h"], "time_options": ["24h", "7d", "30d"]},
+      "panels": [
+
+        {"id": 1, "type": "row", "title": "24h Summary", "gridPos": {"x": 0, "y": 0, "w": 24, "h": 1}, "collapsed": false},
+
+        {"id": 2, "type": "stat", "title": "Total Requests (24h)",
+          "gridPos": {"x": 0, "y": 1, "w": 4, "h": 4},
+          "datasource": {"type": "prometheus", "uid": "mimir"},
+          "options": {"reduceOptions": {"calcs": ["sum"]}, "colorMode": "background", "graphMode": "none", "textMode": "auto"},
+          "fieldConfig": {"defaults": {"unit": "short", "decimals": 0,
+            "thresholds": {"mode": "absolute", "steps": [{"color": "blue", "value": null}]}}},
+          "targets": [{"expr": "sum(increase(http_requests_total{namespace=\"peerisland\"}[$__range]))", "refId": "A", "instant": false}]},
+
+        {"id": 3, "type": "stat", "title": "5xx Errors (24h)",
+          "gridPos": {"x": 4, "y": 1, "w": 4, "h": 4},
+          "datasource": {"type": "prometheus", "uid": "mimir"},
+          "options": {"reduceOptions": {"calcs": ["sum"]}, "colorMode": "background", "graphMode": "none"},
+          "fieldConfig": {"defaults": {"unit": "short", "decimals": 0,
+            "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 10}, {"color": "red", "value": 100}]}}},
+          "targets": [{"expr": "sum(increase(http_requests_total{namespace=\"peerisland\",status_code=~\"5..\"}[$__range]))", "refId": "A", "instant": false}]},
+
+        {"id": 4, "type": "stat", "title": "Error Rate (24h avg)",
+          "gridPos": {"x": 8, "y": 1, "w": 4, "h": 4},
+          "datasource": {"type": "prometheus", "uid": "mimir"},
+          "options": {"reduceOptions": {"calcs": ["mean"]}, "colorMode": "background", "graphMode": "none"},
+          "fieldConfig": {"defaults": {"unit": "percentunit", "decimals": 3,
+            "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 0.001}, {"color": "red", "value": 0.01}]}}},
+          "targets": [{"expr": "sli:peerisland:error_ratio:rate1h", "refId": "A", "instant": false}]},
+
+        {"id": 5, "type": "stat", "title": "SLI Score (24h avg)",
+          "gridPos": {"x": 12, "y": 1, "w": 4, "h": 4},
+          "datasource": {"type": "prometheus", "uid": "mimir"},
+          "options": {"reduceOptions": {"calcs": ["mean"]}, "colorMode": "background", "graphMode": "none"},
+          "fieldConfig": {"defaults": {"unit": "percentunit", "decimals": 4,
+            "thresholds": {"mode": "absolute", "steps": [{"color": "red", "value": null}, {"color": "yellow", "value": 0.995}, {"color": "green", "value": 0.999}]}}},
+          "targets": [{"expr": "1 - sli:peerisland:error_ratio:rate1h", "refId": "A", "instant": false}]},
+
+        {"id": 6, "type": "stat", "title": "Error Budget Remaining (30d)",
+          "gridPos": {"x": 16, "y": 1, "w": 4, "h": 4},
+          "datasource": {"type": "prometheus", "uid": "mimir"},
+          "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "colorMode": "background", "graphMode": "none"},
+          "fieldConfig": {"defaults": {"unit": "percentunit", "decimals": 1,
+            "thresholds": {"mode": "absolute", "steps": [{"color": "red", "value": null}, {"color": "yellow", "value": 0.25}, {"color": "green", "value": 0.5}]}}},
+          "targets": [{"expr": "clamp_min(slo:peerisland:error_budget_remaining, 0)", "refId": "A", "instant": true}]},
+
+        {"id": 7, "type": "stat", "title": "Pod Restarts (24h)",
+          "gridPos": {"x": 20, "y": 1, "w": 4, "h": 4},
+          "datasource": {"type": "prometheus", "uid": "mimir"},
+          "options": {"reduceOptions": {"calcs": ["sum"]}, "colorMode": "background", "graphMode": "none"},
+          "fieldConfig": {"defaults": {"unit": "short", "decimals": 0,
+            "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 3}, {"color": "red", "value": 10}]}}},
+          "targets": [{"expr": "sum(increase(kube_pod_container_status_restarts_total{namespace=\"peerisland\"}[$__range]))", "refId": "A", "instant": false}]},
+
+        {"id": 8, "type": "stat", "title": "Peak p99 Latency (24h)",
+          "gridPos": {"x": 0, "y": 5, "w": 4, "h": 4},
+          "datasource": {"type": "prometheus", "uid": "mimir"},
+          "options": {"reduceOptions": {"calcs": ["max"]}, "colorMode": "background", "graphMode": "none"},
+          "fieldConfig": {"defaults": {"unit": "s", "decimals": 3,
+            "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 0.3}, {"color": "red", "value": 0.5}]}}},
+          "targets": [{"expr": "histogram_quantile(0.99, sum by(le) (rate(http_request_duration_seconds_bucket{namespace=\"peerisland\"}[5m])))", "refId": "A", "instant": false}]},
+
+        {"id": 9, "type": "stat", "title": "Avg p99 Latency (24h)",
+          "gridPos": {"x": 4, "y": 5, "w": 4, "h": 4},
+          "datasource": {"type": "prometheus", "uid": "mimir"},
+          "options": {"reduceOptions": {"calcs": ["mean"]}, "colorMode": "background", "graphMode": "none"},
+          "fieldConfig": {"defaults": {"unit": "s", "decimals": 3,
+            "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 0.2}, {"color": "red", "value": 0.4}]}}},
+          "targets": [{"expr": "histogram_quantile(0.99, sum by(le) (rate(http_request_duration_seconds_bucket{namespace=\"peerisland\"}[5m])))", "refId": "A", "instant": false}]},
+
+        {"id": 10, "type": "stat", "title": "Peak CPU (24h)",
+          "gridPos": {"x": 8, "y": 5, "w": 4, "h": 4},
+          "datasource": {"type": "prometheus", "uid": "mimir"},
+          "options": {"reduceOptions": {"calcs": ["max"]}, "colorMode": "background", "graphMode": "none"},
+          "fieldConfig": {"defaults": {"unit": "cores", "decimals": 2,
+            "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 1}, {"color": "red", "value": 2}]}}},
+          "targets": [{"expr": "sum(rate(container_cpu_usage_seconds_total{namespace=\"peerisland\",container!=\"\"}[5m]))", "refId": "A", "instant": false}]},
+
+        {"id": 11, "type": "stat", "title": "Peak Memory (24h)",
+          "gridPos": {"x": 12, "y": 5, "w": 4, "h": 4},
+          "datasource": {"type": "prometheus", "uid": "mimir"},
+          "options": {"reduceOptions": {"calcs": ["max"]}, "colorMode": "background", "graphMode": "none"},
+          "fieldConfig": {"defaults": {"unit": "bytes",
+            "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 536870912}, {"color": "red", "value": 1073741824}]}}},
+          "targets": [{"expr": "sum(container_memory_working_set_bytes{namespace=\"peerisland\",container!=\"\"})", "refId": "A", "instant": false}]},
+
+        {"id": 12, "type": "stat", "title": "Avg Request Rate (24h)",
+          "gridPos": {"x": 16, "y": 5, "w": 4, "h": 4},
+          "datasource": {"type": "prometheus", "uid": "mimir"},
+          "options": {"reduceOptions": {"calcs": ["mean"]}, "colorMode": "background", "graphMode": "none"},
+          "fieldConfig": {"defaults": {"unit": "reqps", "decimals": 2,
+            "thresholds": {"mode": "absolute", "steps": [{"color": "blue", "value": null}]}}},
+          "targets": [{"expr": "sum(rate(http_requests_total{namespace=\"peerisland\"}[5m]))", "refId": "A", "instant": false}]},
+
+        {"id": 13, "type": "stat", "title": "Alert Fires (24h)",
+          "gridPos": {"x": 20, "y": 5, "w": 4, "h": 4},
+          "datasource": {"type": "prometheus", "uid": "mimir"},
+          "options": {"reduceOptions": {"calcs": ["sum"]}, "colorMode": "background", "graphMode": "none"},
+          "fieldConfig": {"defaults": {"unit": "short", "decimals": 0,
+            "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 1}, {"color": "red", "value": 5}]}}},
+          "targets": [{"expr": "sum(increase(ALERTS_FOR_STATE[$__range]))", "refId": "A", "instant": false}]},
+
+        {"id": 20, "type": "row", "title": "Traffic & Errors", "gridPos": {"x": 0, "y": 9, "w": 24, "h": 1}, "collapsed": false},
+
+        {"id": 21, "type": "timeseries", "title": "Request Rate by Status Code",
+          "gridPos": {"x": 0, "y": 10, "w": 12, "h": 8},
+          "datasource": {"type": "prometheus", "uid": "mimir"},
+          "options": {"tooltip": {"mode": "multi"}, "legend": {"displayMode": "table", "placement": "bottom", "calcs": ["mean", "max", "sum"]}},
+          "fieldConfig": {"defaults": {"unit": "reqps", "custom": {"lineWidth": 2}},
+            "overrides": [
+              {"matcher": {"id": "byName", "options": "2xx"}, "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "green"}}]},
+              {"matcher": {"id": "byName", "options": "4xx"}, "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "yellow"}}]},
+              {"matcher": {"id": "byName", "options": "5xx"}, "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "red"}}]}]},
+          "targets": [
+            {"expr": "sum(rate(http_requests_total{namespace=\"peerisland\",status_code=~\"2..\"}[5m]))", "legendFormat": "2xx", "refId": "A"},
+            {"expr": "sum(rate(http_requests_total{namespace=\"peerisland\",status_code=~\"4..\"}[5m]))", "legendFormat": "4xx", "refId": "B"},
+            {"expr": "sum(rate(http_requests_total{namespace=\"peerisland\",status_code=~\"5..\"}[5m]))", "legendFormat": "5xx", "refId": "C"}]},
+
+        {"id": 22, "type": "timeseries", "title": "SLI Error Ratio (composite: 5xx + latency >500ms)",
+          "gridPos": {"x": 12, "y": 10, "w": 12, "h": 8},
+          "datasource": {"type": "prometheus", "uid": "mimir"},
+          "options": {"tooltip": {"mode": "multi"}, "legend": {"displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"]}},
+          "fieldConfig": {"defaults": {"unit": "percentunit", "custom": {"lineWidth": 2}},
+            "overrides": [
+              {"matcher": {"id": "byName", "options": "SLO budget (0.1%)"}, "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "dark-red"}}, {"id": "custom.lineStyle", "value": {"dash": [10, 10], "fill": "dash"}}]}]},
+          "targets": [
+            {"expr": "sli:peerisland:error_ratio:rate5m", "legendFormat": "5m", "refId": "A"},
+            {"expr": "sli:peerisland:error_ratio:rate1h", "legendFormat": "1h (smooth)", "refId": "B"},
+            {"expr": "vector(0.001)", "legendFormat": "SLO budget (0.1%)", "refId": "C"}]},
+
+        {"id": 23, "type": "barchart", "title": "Hourly Error Count",
+          "gridPos": {"x": 0, "y": 18, "w": 12, "h": 7},
+          "datasource": {"type": "prometheus", "uid": "mimir"},
+          "options": {"barWidth": 0.7, "tooltip": {"mode": "single"}, "legend": {"displayMode": "list", "placement": "bottom"}},
+          "fieldConfig": {"defaults": {"unit": "short", "color": {"mode": "fixed", "fixedColor": "red"}}},
+          "targets": [{"expr": "sum(increase(http_requests_total{namespace=\"peerisland\",status_code=~\"5..\"}[1h]))", "legendFormat": "5xx/hr", "refId": "A"}]},
+
+        {"id": 24, "type": "barchart", "title": "Hourly Total Requests",
+          "gridPos": {"x": 12, "y": 18, "w": 12, "h": 7},
+          "datasource": {"type": "prometheus", "uid": "mimir"},
+          "options": {"barWidth": 0.7, "tooltip": {"mode": "single"}, "legend": {"displayMode": "list", "placement": "bottom"}},
+          "fieldConfig": {"defaults": {"unit": "short", "color": {"mode": "fixed", "fixedColor": "blue"}}},
+          "targets": [{"expr": "sum(increase(http_requests_total{namespace=\"peerisland\"}[1h]))", "legendFormat": "requests/hr", "refId": "A"}]},
+
+        {"id": 30, "type": "row", "title": "Latency", "gridPos": {"x": 0, "y": 25, "w": 24, "h": 1}, "collapsed": false},
+
+        {"id": 31, "type": "timeseries", "title": "Latency Percentiles (p50 / p95 / p99)",
+          "gridPos": {"x": 0, "y": 26, "w": 16, "h": 8},
+          "datasource": {"type": "prometheus", "uid": "mimir"},
+          "options": {"tooltip": {"mode": "multi"}, "legend": {"displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"]}},
+          "fieldConfig": {"defaults": {"unit": "s", "custom": {"lineWidth": 2}},
+            "overrides": [
+              {"matcher": {"id": "byName", "options": "p99"}, "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "red"}}]},
+              {"matcher": {"id": "byName", "options": "p95"}, "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "orange"}}]},
+              {"matcher": {"id": "byName", "options": "p50"}, "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "green"}}]},
+              {"matcher": {"id": "byName", "options": "SLO (500ms)"}, "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "dark-red"}}, {"id": "custom.lineStyle", "value": {"dash": [10, 10], "fill": "dash"}}]}]},
+          "targets": [
+            {"expr": "histogram_quantile(0.50, sum by(le) (rate(http_request_duration_seconds_bucket{namespace=\"peerisland\"}[5m])))", "legendFormat": "p50", "refId": "A"},
+            {"expr": "histogram_quantile(0.95, sum by(le) (rate(http_request_duration_seconds_bucket{namespace=\"peerisland\"}[5m])))", "legendFormat": "p95", "refId": "B"},
+            {"expr": "histogram_quantile(0.99, sum by(le) (rate(http_request_duration_seconds_bucket{namespace=\"peerisland\"}[5m])))", "legendFormat": "p99", "refId": "C"},
+            {"expr": "vector(0.5)", "legendFormat": "SLO (500ms)", "refId": "D"}]},
+
+        {"id": 32, "type": "timeseries", "title": "Latency by Service",
+          "gridPos": {"x": 16, "y": 26, "w": 8, "h": 8},
+          "datasource": {"type": "prometheus", "uid": "mimir"},
+          "options": {"tooltip": {"mode": "multi"}, "legend": {"displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"]}},
+          "fieldConfig": {"defaults": {"unit": "s"}},
+          "targets": [
+            {"expr": "histogram_quantile(0.99, sum by(le, service) (rate(http_request_duration_seconds_bucket{namespace=\"peerisland\"}[5m])))", "legendFormat": "p99 {{service}}", "refId": "A"}]},
+
+        {"id": 40, "type": "row", "title": "Resource Usage", "gridPos": {"x": 0, "y": 34, "w": 24, "h": 1}, "collapsed": false},
+
+        {"id": 41, "type": "timeseries", "title": "CPU Usage by Pod",
+          "gridPos": {"x": 0, "y": 35, "w": 12, "h": 8},
+          "datasource": {"type": "prometheus", "uid": "mimir"},
+          "options": {"tooltip": {"mode": "multi"}, "legend": {"displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"]}},
+          "fieldConfig": {"defaults": {"unit": "cores", "custom": {"lineWidth": 1}}},
+          "targets": [
+            {"expr": "sum by(pod) (rate(container_cpu_usage_seconds_total{namespace=\"peerisland\",container!=\"\"}[5m]))", "legendFormat": "{{pod}}", "refId": "A"},
+            {"expr": "sum(rate(container_cpu_usage_seconds_total{namespace=\"peerisland\",container!=\"\"}[5m]))", "legendFormat": "total", "refId": "B"}]},
+
+        {"id": 42, "type": "timeseries", "title": "Memory Usage by Pod",
+          "gridPos": {"x": 12, "y": 35, "w": 12, "h": 8},
+          "datasource": {"type": "prometheus", "uid": "mimir"},
+          "options": {"tooltip": {"mode": "multi"}, "legend": {"displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"]}},
+          "fieldConfig": {"defaults": {"unit": "bytes", "custom": {"lineWidth": 1}}},
+          "targets": [
+            {"expr": "sum by(pod) (container_memory_working_set_bytes{namespace=\"peerisland\",container!=\"\"})", "legendFormat": "{{pod}}", "refId": "A"},
+            {"expr": "sum(container_memory_working_set_bytes{namespace=\"peerisland\",container!=\"\"})", "legendFormat": "total", "refId": "B"}]},
+
+        {"id": 43, "type": "timeseries", "title": "CPU Requests vs Limits vs Usage",
+          "gridPos": {"x": 0, "y": 43, "w": 12, "h": 7},
+          "datasource": {"type": "prometheus", "uid": "mimir"},
+          "options": {"tooltip": {"mode": "multi"}, "legend": {"displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"]}},
+          "fieldConfig": {"defaults": {"unit": "cores"}},
+          "targets": [
+            {"expr": "sum(rate(container_cpu_usage_seconds_total{namespace=\"peerisland\",container!=\"\"}[5m]))", "legendFormat": "usage", "refId": "A"},
+            {"expr": "sum(kube_pod_container_resource_requests{namespace=\"peerisland\",resource=\"cpu\",container!=\"\"})", "legendFormat": "requested", "refId": "B"},
+            {"expr": "sum(kube_pod_container_resource_limits{namespace=\"peerisland\",resource=\"cpu\",container!=\"\"})", "legendFormat": "limit", "refId": "C"}]},
+
+        {"id": 44, "type": "timeseries", "title": "Memory Requests vs Limits vs Usage",
+          "gridPos": {"x": 12, "y": 43, "w": 12, "h": 7},
+          "datasource": {"type": "prometheus", "uid": "mimir"},
+          "options": {"tooltip": {"mode": "multi"}, "legend": {"displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"]}},
+          "fieldConfig": {"defaults": {"unit": "bytes"}},
+          "targets": [
+            {"expr": "sum(container_memory_working_set_bytes{namespace=\"peerisland\",container!=\"\"})", "legendFormat": "usage", "refId": "A"},
+            {"expr": "sum(kube_pod_container_resource_requests{namespace=\"peerisland\",resource=\"memory\",container!=\"\"})", "legendFormat": "requested", "refId": "B"},
+            {"expr": "sum(kube_pod_container_resource_limits{namespace=\"peerisland\",resource=\"memory\",container!=\"\"})", "legendFormat": "limit", "refId": "C"}]},
+
+        {"id": 50, "type": "row", "title": "Pod & Scaling Health", "gridPos": {"x": 0, "y": 50, "w": 24, "h": 1}, "collapsed": false},
+
+        {"id": 51, "type": "timeseries", "title": "HPA Replicas — Backend & Frontend",
+          "gridPos": {"x": 0, "y": 51, "w": 12, "h": 7},
+          "datasource": {"type": "prometheus", "uid": "mimir"},
+          "options": {"tooltip": {"mode": "multi"}, "legend": {"displayMode": "table", "placement": "bottom", "calcs": ["min", "max", "mean"]}},
+          "fieldConfig": {"defaults": {"unit": "short", "min": 0}},
+          "targets": [
+            {"expr": "kube_horizontalpodautoscaler_status_current_replicas{namespace=\"peerisland\",horizontalpodautoscaler=\"backend\"}", "legendFormat": "backend current", "refId": "A"},
+            {"expr": "kube_horizontalpodautoscaler_status_current_replicas{namespace=\"peerisland\",horizontalpodautoscaler=\"frontend\"}", "legendFormat": "frontend current", "refId": "B"},
+            {"expr": "kube_horizontalpodautoscaler_spec_max_replicas{namespace=\"peerisland\",horizontalpodautoscaler=\"backend\"}", "legendFormat": "backend max", "refId": "C"},
+            {"expr": "kube_horizontalpodautoscaler_spec_max_replicas{namespace=\"peerisland\",horizontalpodautoscaler=\"frontend\"}", "legendFormat": "frontend max", "refId": "D"}]},
+
+        {"id": 52, "type": "timeseries", "title": "Pod Restarts Over 24h",
+          "gridPos": {"x": 12, "y": 51, "w": 12, "h": 7},
+          "datasource": {"type": "prometheus", "uid": "mimir"},
+          "options": {"tooltip": {"mode": "multi"}, "legend": {"displayMode": "table", "placement": "bottom", "calcs": ["sum"]}},
+          "fieldConfig": {"defaults": {"unit": "short"}},
+          "targets": [
+            {"expr": "increase(kube_pod_container_status_restarts_total{namespace=\"peerisland\"}[1h])", "legendFormat": "{{pod}}/{{container}}", "refId": "A"}]},
+
+        {"id": 53, "type": "table", "title": "Top Restart Offenders (24h)",
+          "gridPos": {"x": 0, "y": 58, "w": 12, "h": 6},
+          "datasource": {"type": "prometheus", "uid": "mimir"},
+          "options": {"sortBy": [{"displayName": "Restarts", "desc": true}]},
+          "fieldConfig": {"defaults": {"unit": "short"}},
+          "targets": [{"expr": "topk(10, increase(kube_pod_container_status_restarts_total{namespace=\"peerisland\"}[$__range]))", "legendFormat": "{{pod}} / {{container}}", "refId": "A", "instant": true, "format": "table"}],
+          "transformations": [{"id": "organize", "options": {"renameByName": {"Value": "Restarts"}}}]},
+
+        {"id": 54, "type": "table", "title": "Current Pod Status",
+          "gridPos": {"x": 12, "y": 58, "w": 12, "h": 6},
+          "datasource": {"type": "prometheus", "uid": "mimir"},
+          "options": {"sortBy": [{"displayName": "Phase", "desc": false}]},
+          "fieldConfig": {"defaults": {"unit": "short"}},
+          "targets": [{"expr": "kube_pod_status_phase{namespace=\"peerisland\"}", "legendFormat": "{{pod}} — {{phase}}", "refId": "A", "instant": true, "format": "table"}]},
+
+        {"id": 60, "type": "row", "title": "SLO & Error Budget", "gridPos": {"x": 0, "y": 64, "w": 24, "h": 1}, "collapsed": false},
+
+        {"id": 61, "type": "gauge", "title": "30d Availability SLO",
+          "gridPos": {"x": 0, "y": 65, "w": 6, "h": 7},
+          "datasource": {"type": "prometheus", "uid": "mimir"},
+          "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "minVizWidth": 150, "minVizHeight": 100},
+          "fieldConfig": {"defaults": {"unit": "percentunit", "min": 0.99, "max": 1,
+            "thresholds": {"mode": "absolute", "steps": [{"color": "red", "value": null}, {"color": "yellow", "value": 0.995}, {"color": "green", "value": 0.999}]}}},
+          "targets": [{"expr": "1 - sli:peerisland:error_ratio:rate30d", "refId": "A", "instant": true}]},
+
+        {"id": 62, "type": "gauge", "title": "Error Budget Remaining (30d)",
+          "gridPos": {"x": 6, "y": 65, "w": 6, "h": 7},
+          "datasource": {"type": "prometheus", "uid": "mimir"},
+          "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "minVizWidth": 150, "minVizHeight": 100},
+          "fieldConfig": {"defaults": {"unit": "percentunit", "min": 0, "max": 1,
+            "thresholds": {"mode": "absolute", "steps": [{"color": "red", "value": null}, {"color": "yellow", "value": 0.25}, {"color": "green", "value": 0.5}]}}},
+          "targets": [{"expr": "clamp_min(slo:peerisland:error_budget_remaining, 0)", "refId": "A", "instant": true}]},
+
+        {"id": 63, "type": "timeseries", "title": "SLO Burn Rate (1h + 6h) vs Thresholds",
+          "gridPos": {"x": 12, "y": 65, "w": 12, "h": 7},
+          "datasource": {"type": "prometheus", "uid": "mimir"},
+          "options": {"tooltip": {"mode": "multi"}, "legend": {"displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"]}},
+          "fieldConfig": {"defaults": {"unit": "short", "custom": {"lineWidth": 2}},
+            "overrides": [
+              {"matcher": {"id": "byName", "options": "fast-burn (page)"}, "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "dark-red"}}, {"id": "custom.lineStyle", "value": {"dash": [10, 10], "fill": "dash"}}]},
+              {"matcher": {"id": "byName", "options": "slow-burn (ticket)"}, "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "dark-orange"}}, {"id": "custom.lineStyle", "value": {"dash": [10, 10], "fill": "dash"}}]}]},
+          "targets": [
+            {"expr": "sli:peerisland:error_ratio:rate1h / 0.001", "legendFormat": "burn rate 1h", "refId": "A"},
+            {"expr": "sli:peerisland:error_ratio:rate6h / 0.001", "legendFormat": "burn rate 6h", "refId": "B"},
+            {"expr": "vector(14)", "legendFormat": "fast-burn (page)", "refId": "C"},
+            {"expr": "vector(6)", "legendFormat": "slow-burn (ticket)", "refId": "D"}]},
+
+        {"id": 64, "type": "timeseries", "title": "Error Budget Burn (cumulative today)",
+          "gridPos": {"x": 0, "y": 72, "w": 12, "h": 7},
+          "datasource": {"type": "prometheus", "uid": "mimir"},
+          "options": {"tooltip": {"mode": "multi"}, "legend": {"displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull"]}},
+          "fieldConfig": {"defaults": {"unit": "percentunit", "min": 0}},
+          "targets": [
+            {"expr": "clamp_min(slo:peerisland:error_budget_remaining, 0)", "legendFormat": "budget remaining", "refId": "A"}]},
+
+        {"id": 65, "type": "timeseries", "title": "24h Availability per Hour",
+          "gridPos": {"x": 12, "y": 72, "w": 12, "h": 7},
+          "datasource": {"type": "prometheus", "uid": "mimir"},
+          "options": {"tooltip": {"mode": "multi"}, "legend": {"displayMode": "list", "placement": "bottom"}},
+          "fieldConfig": {"defaults": {"unit": "percentunit", "min": 0.99, "max": 1,
+            "thresholds": {"mode": "absolute", "steps": [{"color": "red", "value": null}, {"color": "yellow", "value": 0.995}, {"color": "green", "value": 0.999}]},
+            "custom": {"thresholdsStyle": {"mode": "area"}}}},
+          "targets": [{"expr": "1 - sli:peerisland:error_ratio:rate1h", "legendFormat": "availability", "refId": "A"}]},
+
+        {"id": 70, "type": "row", "title": "Infrastructure (Nodes)", "gridPos": {"x": 0, "y": 79, "w": 24, "h": 1}, "collapsed": false},
+
+        {"id": 71, "type": "timeseries", "title": "Node CPU Usage",
+          "gridPos": {"x": 0, "y": 80, "w": 12, "h": 7},
+          "datasource": {"type": "prometheus", "uid": "mimir"},
+          "options": {"tooltip": {"mode": "multi"}, "legend": {"displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"]}},
+          "fieldConfig": {"defaults": {"unit": "percentunit", "min": 0, "max": 1,
+            "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 0.7}, {"color": "red", "value": 0.85}]},
+            "custom": {"thresholdsStyle": {"mode": "line+area"}}}},
+          "targets": [{"expr": "1 - avg by(node) (rate(node_cpu_seconds_total{mode=\"idle\"}[5m]))", "legendFormat": "{{node}}", "refId": "A"}]},
+
+        {"id": 72, "type": "timeseries", "title": "Node Memory Usage",
+          "gridPos": {"x": 12, "y": 80, "w": 12, "h": 7},
+          "datasource": {"type": "prometheus", "uid": "mimir"},
+          "options": {"tooltip": {"mode": "multi"}, "legend": {"displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"]}},
+          "fieldConfig": {"defaults": {"unit": "percentunit", "min": 0, "max": 1,
+            "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 0.75}, {"color": "red", "value": 0.9}]},
+            "custom": {"thresholdsStyle": {"mode": "line+area"}}}},
+          "targets": [{"expr": "1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)", "legendFormat": "{{node}}", "refId": "A"}]},
+
+        {"id": 73, "type": "table", "title": "Node Summary (24h peak)",
+          "gridPos": {"x": 0, "y": 87, "w": 24, "h": 6},
+          "datasource": {"type": "prometheus", "uid": "mimir"},
+          "options": {"sortBy": [{"displayName": "CPU peak", "desc": true}]},
+          "fieldConfig": {"defaults": {"unit": "percentunit", "decimals": 2}},
+          "targets": [
+            {"expr": "max_over_time((1 - avg by(node) (rate(node_cpu_seconds_total{mode=\"idle\"}[5m])))[24h:5m])", "legendFormat": "CPU peak — {{node}}", "refId": "A", "instant": true, "format": "table"},
+            {"expr": "max_over_time((1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes))[24h:5m])", "legendFormat": "Mem peak — {{node}}", "refId": "B", "instant": true, "format": "table"}]},
+
+        {"id": 80, "type": "row", "title": "Log Summary", "gridPos": {"x": 0, "y": 93, "w": 24, "h": 1}, "collapsed": false},
+
+        {"id": 81, "type": "timeseries", "title": "Log Volume by Level (24h)",
+          "gridPos": {"x": 0, "y": 94, "w": 12, "h": 7},
+          "datasource": {"type": "loki", "uid": "loki"},
+          "options": {"tooltip": {"mode": "multi"}, "legend": {"displayMode": "table", "placement": "bottom", "calcs": ["sum"]}},
+          "fieldConfig": {"defaults": {"unit": "short", "custom": {"lineWidth": 2}},
+            "overrides": [
+              {"matcher": {"id": "byName", "options": "error"}, "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "red"}}]},
+              {"matcher": {"id": "byName", "options": "warn"}, "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "yellow"}}]},
+              {"matcher": {"id": "byName", "options": "info"}, "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "blue"}}]}]},
+          "targets": [
+            {"expr": "sum(rate({namespace=\"peerisland\", level=\"error\"}[5m]))", "legendFormat": "error", "refId": "A"},
+            {"expr": "sum(rate({namespace=\"peerisland\", level=\"warn\"}[5m]))", "legendFormat": "warn", "refId": "B"},
+            {"expr": "sum(rate({namespace=\"peerisland\", level=\"info\"}[5m]))", "legendFormat": "info", "refId": "C"}]},
+
+        {"id": 82, "type": "timeseries", "title": "Error Log Rate by Service",
+          "gridPos": {"x": 12, "y": 94, "w": 12, "h": 7},
+          "datasource": {"type": "loki", "uid": "loki"},
+          "options": {"tooltip": {"mode": "multi"}, "legend": {"displayMode": "table", "placement": "bottom", "calcs": ["sum", "max"]}},
+          "fieldConfig": {"defaults": {"unit": "short"}},
+          "targets": [
+            {"expr": "sum by(service) (rate({namespace=\"peerisland\", level=\"error\"}[5m]))", "legendFormat": "{{service}}", "refId": "A"}]},
+
+        {"id": 83, "type": "logs", "title": "Recent Error Logs (backend + frontend)",
+          "gridPos": {"x": 0, "y": 101, "w": 24, "h": 10},
+          "datasource": {"type": "loki", "uid": "loki"},
+          "options": {"dedupStrategy": "none", "showLabels": true, "showTime": true, "sortOrder": "Descending", "wrapLogMessage": false},
+          "targets": [{"expr": "{namespace=\"peerisland\", level=\"error\"}", "refId": "A"}]},
+
+        {"id": 90, "type": "row", "title": "Automated Daily Report Log", "gridPos": {"x": 0, "y": 111, "w": 24, "h": 1}, "collapsed": false},
+
+        {"id": 91, "type": "logs", "title": "Daily Report CronJob Output",
+          "gridPos": {"x": 0, "y": 112, "w": 24, "h": 10},
+          "datasource": {"type": "loki", "uid": "loki"},
+          "options": {"dedupStrategy": "none", "showLabels": false, "showTime": true, "sortOrder": "Descending", "wrapLogMessage": true},
+          "targets": [{"expr": "{namespace=\"monitoring\", service=\"daily-report\"}", "refId": "A"}]}
+      ]
+    }

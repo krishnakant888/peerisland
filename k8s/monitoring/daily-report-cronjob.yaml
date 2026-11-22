@@ -9,51 +9,94 @@ data:
     set -e
 
     PROMETHEUS_URL="${PROMETHEUS_URL:-http://mimir.monitoring.svc.cluster.local:8080/prometheus}"
+    LOKI_URL="${LOKI_URL:-http://loki.monitoring.svc.cluster.local:3100}"
     DATE=$(date -u +"%Y-%m-%d")
     RANGE="24h"
+    NOW=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+    NOW_NS=$(date -u +%s)000000000
 
+    # Query Mimir for a single instant value
     query() {
-      curl -sf "${PROMETHEUS_URL}/api/v1/query?query=$(printf '%s' "$1" | jq -sRr @uri)" \
+      curl -sf "${PROMETHEUS_URL}/api/v1/query" \
+        --data-urlencode "query=$1" \
         | jq -r '.data.result[0].value[1] // "N/A"'
     }
 
-    echo "============================================"
-    echo " PeerIsland Daily Performance Report"
-    echo " Date: $DATE"
-    echo "============================================"
-    echo ""
+    # Round float to 4 decimal places
+    round4() { printf "%.4f" "$1" 2>/dev/null || echo "$1"; }
+    round2() { printf "%.2f" "$1" 2>/dev/null || echo "$1"; }
 
-    echo "--- Request Metrics (last 24h) ---"
-    TOTAL=$(query "sum(increase(http_requests_total{namespace=\"peerisland\"}[${RANGE}]))")
-    ERROR=$(query "sum(increase(http_requests_total{namespace=\"peerisland\",status_code=~\"5..\"}[${RANGE}]))")
-    echo "  Total requests    : $TOTAL"
-    echo "  5xx errors        : $ERROR"
+    # Push a log line to Loki under the daily-report stream
+    loki_push() {
+      MSG="$1"
+      curl -sf -X POST "${LOKI_URL}/loki/api/v1/push" \
+        -H "Content-Type: application/json" \
+        -d "{\"streams\":[{\"stream\":{\"namespace\":\"monitoring\",\"service\":\"daily-report\",\"date\":\"${DATE}\"},\"values\":[[\"${NOW_NS}\",\"${MSG}\"]]}]}" \
+        > /dev/null
+    }
 
-    echo ""
-    echo "--- Latency (last 24h) ---"
+    log() {
+      echo "$1"
+      loki_push "$1"
+    }
+
+    # ── Gather metrics ────────────────────────────────────────────────────────
+
+    TOTAL_REQUESTS=$(query "sum(increase(http_requests_total{namespace=\"peerisland\"}[${RANGE}]))")
+    TOTAL_ERRORS=$(query "sum(increase(http_requests_total{namespace=\"peerisland\",status_code=~\"5..\"}[${RANGE}]))")
+    ERROR_RATE=$(query "sli:peerisland:error_ratio:rate1h")
+    SLI_SCORE=$(query "1 - sli:peerisland:error_ratio:rate1h")
+    ERROR_BUDGET=$(query "clamp_min(slo:peerisland:error_budget_remaining, 0)")
+    BURN_RATE_1H=$(query "sli:peerisland:error_ratio:rate1h / 0.001")
+    BURN_RATE_6H=$(query "sli:peerisland:error_ratio:rate6h / 0.001")
+
     P50=$(query "histogram_quantile(0.50,sum(rate(http_request_duration_seconds_bucket{namespace=\"peerisland\"}[${RANGE}]))by(le))")
     P95=$(query "histogram_quantile(0.95,sum(rate(http_request_duration_seconds_bucket{namespace=\"peerisland\"}[${RANGE}]))by(le))")
     P99=$(query "histogram_quantile(0.99,sum(rate(http_request_duration_seconds_bucket{namespace=\"peerisland\"}[${RANGE}]))by(le))")
-    echo "  p50               : ${P50}s"
-    echo "  p95               : ${P95}s"
-    echo "  p99               : ${P99}s"
 
-    echo ""
-    echo "--- Resource Usage (current) ---"
-    CPU=$(query "sum(rate(container_cpu_usage_seconds_total{namespace=\"peerisland\",container!=\"\"}[5m]))")
-    MEM=$(query "sum(container_memory_working_set_bytes{namespace=\"peerisland\",container!=\"\"})")
-    echo "  CPU cores used    : $CPU"
-    echo "  Memory bytes used : $MEM"
+    CPU_CORES=$(query "sum(rate(container_cpu_usage_seconds_total{namespace=\"peerisland\",container!=\"\"}[5m]))")
+    MEM_BYTES=$(query "sum(container_memory_working_set_bytes{namespace=\"peerisland\",container!=\"\"})")
+    POD_RESTARTS=$(query "sum(increase(kube_pod_container_status_restarts_total{namespace=\"peerisland\"}[${RANGE}]))")
+    RUNNING_PODS=$(query "count(kube_pod_status_phase{namespace=\"peerisland\",phase=\"Running\"})")
+    BACKEND_REPLICAS=$(query "sum(kube_replicaset_status_ready_replicas{namespace=\"peerisland\",replicaset=~\"backend-.*\"})")
+    FRONTEND_REPLICAS=$(query "sum(kube_replicaset_status_ready_replicas{namespace=\"peerisland\",replicaset=~\"frontend-.*\"})")
 
-    echo ""
-    echo "--- Pod Health ---"
-    RESTARTS=$(query "sum(increase(kube_pod_container_status_restarts_total{namespace=\"peerisland\"}[${RANGE}]))")
-    echo "  Restarts (24h)    : $RESTARTS"
+    # ── Print & push to Loki ──────────────────────────────────────────────────
 
-    echo ""
-    echo "============================================"
-    echo " Report complete"
-    echo "============================================"
+    log "========================================================================"
+    log " PeerIsland Daily Performance Report — ${DATE}"
+    log "========================================================================"
+    log ""
+    log "── Traffic ─────────────────────────────────────────────────────────────"
+    log "  Total requests (24h)     : $(round2 ${TOTAL_REQUESTS})"
+    log "  5xx errors (24h)         : $(round2 ${TOTAL_ERRORS})"
+    log "  Avg request rate         : $(query "sum(rate(http_requests_total{namespace=\"peerisland\"}[${RANGE}]))" ) req/s"
+    log ""
+    log "── SLO & Error Budget ───────────────────────────────────────────────────"
+    log "  SLI score (24h avg)      : $(round4 ${SLI_SCORE})  (target: 0.9990)"
+    log "  Error ratio (24h avg)    : $(round4 ${ERROR_RATE})"
+    log "  Burn rate 1h             : $(round2 ${BURN_RATE_1H})x  (threshold: 14x)"
+    log "  Burn rate 6h             : $(round2 ${BURN_RATE_6H})x  (threshold: 6x)"
+    log "  Error budget remaining   : $(round4 ${ERROR_BUDGET})  (0=depleted, 1=full)"
+    log ""
+    log "── Latency (24h) ────────────────────────────────────────────────────────"
+    log "  p50                      : $(round4 ${P50})s"
+    log "  p95                      : $(round4 ${P95})s"
+    log "  p99                      : $(round4 ${P99})s  (SLO: <0.5s)"
+    log ""
+    log "── Resource Usage (current snapshot) ───────────────────────────────────"
+    log "  CPU cores in use         : $(round4 ${CPU_CORES})"
+    log "  Memory in use            : ${MEM_BYTES} bytes"
+    log "  Running pods             : ${RUNNING_PODS}"
+    log "  Backend ready replicas   : ${BACKEND_REPLICAS}"
+    log "  Frontend ready replicas  : ${FRONTEND_REPLICAS}"
+    log ""
+    log "── Stability ────────────────────────────────────────────────────────────"
+    log "  Pod restarts (24h)       : $(round2 ${POD_RESTARTS})"
+    log ""
+    log "========================================================================"
+    log " Report complete: ${NOW}"
+    log "========================================================================"
 ---
 apiVersion: batch/v1
 kind: CronJob
@@ -61,7 +104,7 @@ metadata:
   name: daily-report
   namespace: monitoring
 spec:
-  schedule: "0 7 * * *"  # 07:00 UTC daily
+  schedule: "0 7 * * *"   # 07:00 UTC = 12:30 IST daily
   concurrencyPolicy: Forbid
   successfulJobsHistoryLimit: 7
   failedJobsHistoryLimit: 3
@@ -70,6 +113,7 @@ spec:
       template:
         spec:
           restartPolicy: OnFailure
+          serviceAccountName: default
           securityContext:
             runAsNonRoot: true
             runAsUser: 65534
@@ -80,6 +124,8 @@ spec:
               env:
                 - name: PROMETHEUS_URL
                   value: "http://mimir.monitoring.svc.cluster.local:8080/prometheus"
+                - name: LOKI_URL
+                  value: "http://loki.monitoring.svc.cluster.local:3100"
               resources:
                 requests:
                   cpu: "50m"
@@ -95,8 +141,12 @@ spec:
               volumeMounts:
                 - name: scripts
                   mountPath: /scripts
+                - name: tmp
+                  mountPath: /tmp
           volumes:
             - name: scripts
               configMap:
                 name: daily-report-script
                 defaultMode: 0555
+            - name: tmp
+              emptyDir: {}

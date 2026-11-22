@@ -1,0 +1,105 @@
+# SLI recording rules loaded into Mimir's ruler via its HTTP API.
+# PrometheusRule CRD is not installed (no kube-prometheus-stack).
+# This Job runs as an ArgoCD PostSync hook — idempotent, safe to re-run.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mimir-ruler-rules
+  namespace: monitoring
+data:
+  # Composite SLI: good = NOT 5xx AND finishes within 500ms.
+  # Evaluated every 30s — cheap instant-vector queries used by SLO alerts.
+  peerisland-sli.yaml: |
+    name: peerisland-sli
+    interval: 30s
+    rules:
+      - record: sli:peerisland:requests_good:rate5m
+        expr: >-
+          sum(rate(http_request_duration_seconds_bucket{namespace="peerisland",le="0.5",status_code!~"5.."}[5m]))
+      - record: sli:peerisland:requests_total:rate5m
+        expr: >-
+          sum(rate(http_request_duration_seconds_count{namespace="peerisland"}[5m]))
+      - record: sli:peerisland:error_ratio:rate5m
+        expr: >-
+          1 - (sli:peerisland:requests_good:rate5m / sli:peerisland:requests_total:rate5m)
+      - record: sli:peerisland:error_ratio:rate30m
+        expr: >-
+          1 - (
+            sum(rate(http_request_duration_seconds_bucket{namespace="peerisland",le="0.5",status_code!~"5.."}[30m]))
+            / sum(rate(http_request_duration_seconds_count{namespace="peerisland"}[30m]))
+          )
+      - record: sli:peerisland:error_ratio:rate1h
+        expr: >-
+          1 - (
+            sum(rate(http_request_duration_seconds_bucket{namespace="peerisland",le="0.5",status_code!~"5.."}[1h]))
+            / sum(rate(http_request_duration_seconds_count{namespace="peerisland"}[1h]))
+          )
+      - record: sli:peerisland:error_ratio:rate6h
+        expr: >-
+          1 - (
+            sum(rate(http_request_duration_seconds_bucket{namespace="peerisland",le="0.5",status_code!~"5.."}[6h]))
+            / sum(rate(http_request_duration_seconds_count{namespace="peerisland"}[6h]))
+          )
+
+  # 30-day composite error ratio and error budget — evaluated every 5m.
+  peerisland-slo-30d.yaml: |
+    name: peerisland-slo-30d
+    interval: 5m
+    rules:
+      - record: sli:peerisland:error_ratio:rate30d
+        expr: >-
+          1 - (
+            sum(increase(http_request_duration_seconds_bucket{namespace="peerisland",le="0.5",status_code!~"5.."}[30d]))
+            / sum(increase(http_request_duration_seconds_count{namespace="peerisland"}[30d]))
+          )
+      - record: slo:peerisland:error_budget_remaining
+        expr: 1 - (sli:peerisland:error_ratio:rate30d / 0.001)
+---
+# PostSync hook: pushes recording rules into Mimir's ruler on every ArgoCD sync.
+# BeforeHookCreation deletes the previous job so the new one can run cleanly.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: mimir-load-recording-rules
+  namespace: monitoring
+  annotations:
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+spec:
+  ttlSecondsAfterFinished: 300
+  template:
+    spec:
+      restartPolicy: OnFailure
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+      containers:
+        - name: load-rules
+          image: alpine/curl:latest
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -e
+              BASE="http://mimir.monitoring.svc.cluster.local:8080/prometheus/config/v1/rules/peerisland"
+              echo "Loading peerisland-sli rules..."
+              curl -sf -X POST "${BASE}" -H "Content-Type: application/yaml" --data-binary @/rules/peerisland-sli.yaml
+              echo "Loading peerisland-slo-30d rules..."
+              curl -sf -X POST "${BASE}" -H "Content-Type: application/yaml" --data-binary @/rules/peerisland-slo-30d.yaml
+              echo "Done. Verifying..."
+              curl -sf "${BASE}" | head -c 500
+          volumeMounts:
+            - name: rules
+              mountPath: /rules
+          resources:
+            requests: {cpu: 50m, memory: 32Mi}
+            limits: {cpu: 100m, memory: 64Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+      volumes:
+        - name: rules
+          configMap:
+            name: mimir-ruler-rules

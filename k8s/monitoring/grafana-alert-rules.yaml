@@ -35,6 +35,7 @@ data:
             annotations:
               summary: "Backend error rate above 5%"
               description: "Error rate is {{ $value | humanizePercentage }} over the last 5 minutes."
+              runbook: "docs/runbooks/peerisland.md#backend-high-error-rate"
             labels:
               severity: critical
               team: platform
@@ -60,6 +61,7 @@ data:
             annotations:
               summary: "Backend p99 latency above 1 second"
               description: "p99 latency is {{ $value | humanizeDuration }} over the last 10 minutes."
+              runbook: "docs/runbooks/peerisland.md#backend-high-latency"
             labels:
               severity: warning
               team: platform
@@ -85,6 +87,7 @@ data:
             annotations:
               summary: "Backend pod {{ $labels.pod }} is crash-looping"
               description: "Pod restarted {{ $value | humanize }} times in the last 15 minutes."
+              runbook: "docs/runbooks/peerisland.md#crash-looping"
             labels:
               severity: critical
               team: platform
@@ -110,6 +113,7 @@ data:
             annotations:
               summary: "Backend HPA at maximum replicas"
               description: "HPA has been at maxReplicas ({{ $value }}) for over 10 minutes."
+              runbook: "docs/runbooks/peerisland.md#hpa-saturation"
             labels:
               severity: warning
               team: platform
@@ -124,8 +128,8 @@ data:
                 relativeTimeRange: {from: 300, to: 0}
                 model:
                   expr: |
-                    sum(rate(http_requests_total{namespace="peerisland",pod=~"frontend.*",status_code=~"5.."}[5m]))
-                    / sum(rate(http_requests_total{namespace="peerisland",pod=~"frontend.*"}[5m])) > 0.05
+                    sum(rate(http_requests_total{namespace="peerisland",service="frontend",status_code=~"5.."}[5m]))
+                    / sum(rate(http_requests_total{namespace="peerisland",service="frontend"}[5m])) > 0.05
                   instant: true
                   refId: A
             for: 5m
@@ -134,6 +138,7 @@ data:
             annotations:
               summary: "Frontend error rate above 5%"
               description: "Error rate is {{ $value | humanizePercentage }} over the last 5 minutes."
+              runbook: "docs/runbooks/peerisland.md#frontend-high-error-rate"
             labels:
               severity: critical
               team: platform
@@ -159,6 +164,7 @@ data:
             annotations:
               summary: "Frontend pod {{ $labels.pod }} is crash-looping"
               description: "Pod restarted {{ $value | humanize }} times in the last 15 minutes."
+              runbook: "docs/runbooks/peerisland.md#crash-looping"
             labels:
               severity: critical
               team: platform
@@ -184,6 +190,7 @@ data:
             annotations:
               summary: "Frontend HPA at maximum replicas — capacity pressure"
               description: "Frontend HPA has been at maxReplicas ({{ $value }}) for over 10 minutes."
+              runbook: "docs/runbooks/peerisland.md#hpa-saturation"
             labels:
               severity: warning
               team: platform
@@ -198,7 +205,9 @@ data:
                 relativeTimeRange: {from: 300, to: 0}
                 model:
                   expr: |
-                    kube_pod_container_status_last_terminated_reason{namespace=~"peerisland|monitoring|argocd|ingress-nginx",reason="OOMKilled"} == 1
+                    (increase(kube_pod_container_status_restarts_total{namespace=~"peerisland|monitoring|argocd|ingress-nginx"}[5m]) > 0)
+                    and on(namespace, pod, container)
+                    (kube_pod_container_status_last_terminated_reason{reason="OOMKilled"} == 1)
                   instant: true
                   refId: A
             for: 0s
@@ -207,6 +216,7 @@ data:
             annotations:
               summary: "Pod {{ $labels.pod }} OOMKilled in {{ $labels.namespace }}"
               description: "Container {{ $labels.container }} was OOMKilled — increase memory limit."
+              runbook: "docs/runbooks/peerisland.md#oom-killed"
             labels:
               severity: warning
               team: platform
@@ -230,6 +240,7 @@ data:
             annotations:
               summary: "PVC {{ $labels.persistentvolumeclaim }} is {{ $value | humanizePercentage }} full"
               description: "PVC in namespace {{ $labels.namespace }} will run out of space soon."
+              runbook: "docs/runbooks/peerisland.md#pvc-near-full"
             labels:
               severity: warning
               team: platform
@@ -253,6 +264,7 @@ data:
             annotations:
               summary: "Certificate {{ $labels.name }} in {{ $labels.namespace }} expires in < 7 days"
               description: "cert-manager should auto-renew — check if renewal is stuck."
+              runbook: "docs/runbooks/peerisland.md#certificate-expiry"
             labels:
               severity: critical
               team: platform
@@ -276,6 +288,7 @@ data:
             annotations:
               summary: "Certificate {{ $labels.name }} in {{ $labels.namespace }} is not ready"
               description: "TLS certificate has been not-ready for 10 minutes — HTTPS may be broken."
+              runbook: "docs/runbooks/peerisland.md#certificate-expiry"
             labels:
               severity: critical
               team: platform
@@ -299,63 +312,139 @@ data:
             annotations:
               summary: "ArgoCD app {{ $labels.name }} is {{ $labels.health_status }}"
               description: "Check ArgoCD UI at https://peerisland.centralindia.cloudapp.azure.com/argocd"
+              runbook: "docs/runbooks/peerisland.md#argocd-app-unhealthy"
             labels:
               severity: warning
               team: platform
             isPaused: false
 
+          # Multiwindow: BOTH long (1h) AND short (5m) windows must exceed the threshold.
+          # Long window proves the burn is real; short window proves it is still happening now.
           - uid: slo-high-burn-rate
             title: SLOAvailabilityHighBurnRate
-            condition: A
+            condition: C
             data:
               - refId: A
                 datasourceUid: mimir
                 relativeTimeRange: {from: 3600, to: 0}
                 model:
-                  expr: |
-                    (
-                      sum(rate(http_requests_total{namespace="peerisland",status_code=~"5.."}[1h]))
-                      / sum(rate(http_requests_total{namespace="peerisland"}[1h]))
-                    ) > (14 * 0.001)
+                  expr: "sli:peerisland:error_ratio:rate1h"
                   instant: true
                   refId: A
+              - refId: B
+                datasourceUid: mimir
+                relativeTimeRange: {from: 300, to: 0}
+                model:
+                  expr: "sli:peerisland:error_ratio:rate5m"
+                  instant: true
+                  refId: B
+              - refId: C
+                datasourceUid: __expr__
+                model:
+                  refId: C
+                  type: math
+                  expression: "$A > 0.014 && $B > 0.014"
             for: 2m
-            noDataState: NoData
+            noDataState: OK
             execErrState: Error
             annotations:
-              summary: "SLO: availability burning budget 14x fast (error rate {{ $value | humanizePercentage }})"
+              summary: "SLO: availability burning budget 14x fast (1h + 5m windows)"
               description: "At this rate, the 30-day error budget will be exhausted in < 2 days. Page immediately."
+              runbook: "docs/runbooks/peerisland.md#slo-fast-burn"
             labels:
               severity: critical
               team: platform
               slo: availability
             isPaused: false
 
+          # Multiwindow: BOTH long (6h) AND short (30m) windows must exceed the threshold.
           - uid: slo-medium-burn-rate
             title: SLOAvailabilityMediumBurnRate
-            condition: A
+            condition: C
             data:
               - refId: A
                 datasourceUid: mimir
                 relativeTimeRange: {from: 21600, to: 0}
                 model:
-                  expr: |
-                    (
-                      sum(rate(http_requests_total{namespace="peerisland",status_code=~"5.."}[6h]))
-                      / sum(rate(http_requests_total{namespace="peerisland"}[6h]))
-                    ) > (6 * 0.001)
+                  expr: "sli:peerisland:error_ratio:rate6h"
                   instant: true
                   refId: A
+              - refId: B
+                datasourceUid: mimir
+                relativeTimeRange: {from: 1800, to: 0}
+                model:
+                  expr: "sli:peerisland:error_ratio:rate30m"
+                  instant: true
+                  refId: B
+              - refId: C
+                datasourceUid: __expr__
+                model:
+                  refId: C
+                  type: math
+                  expression: "$A > 0.006 && $B > 0.006"
             for: 15m
-            noDataState: NoData
+            noDataState: OK
             execErrState: Error
             annotations:
-              summary: "SLO: availability burning budget 6x fast (slow burn)"
+              summary: "SLO: availability burning budget 6x fast (6h + 30m windows)"
               description: "At this rate, the 30-day error budget will be exhausted in < 5 days. Create a ticket."
+              runbook: "docs/runbooks/peerisland.md#slo-slow-burn"
             labels:
               severity: warning
               team: platform
               slo: availability
+            isPaused: false
+
+          - uid: backend-no-replicas
+            title: BackendNoAvailableReplicas
+            condition: C
+            data:
+              - refId: A
+                datasourceUid: mimir
+                relativeTimeRange: {from: 300, to: 0}
+                model:
+                  expr: 'sum(kube_replicaset_status_ready_replicas{namespace="peerisland",replicaset=~"backend-.*"})'
+                  instant: true
+                  refId: A
+              - refId: C
+                datasourceUid: __expr__
+                model: {refId: C, type: math, expression: "$A < 1"}
+            for: 1m
+            noDataState: Alerting
+            execErrState: Error
+            annotations:
+              summary: "Backend deployment has no available replicas"
+              description: "backend has 0 ready pods — service is completely down."
+              runbook: "docs/runbooks/peerisland.md#no-replicas"
+            labels:
+              severity: critical
+              team: platform
+            isPaused: false
+
+          - uid: frontend-no-replicas
+            title: FrontendNoAvailableReplicas
+            condition: C
+            data:
+              - refId: A
+                datasourceUid: mimir
+                relativeTimeRange: {from: 300, to: 0}
+                model:
+                  expr: 'sum(kube_replicaset_status_ready_replicas{namespace="peerisland",replicaset=~"frontend-.*"})'
+                  instant: true
+                  refId: A
+              - refId: C
+                datasourceUid: __expr__
+                model: {refId: C, type: math, expression: "$A < 1"}
+            for: 1m
+            noDataState: Alerting
+            execErrState: Error
+            annotations:
+              summary: "Frontend deployment has no available replicas"
+              description: "frontend has 0 ready pods — service is completely down."
+              runbook: "docs/runbooks/peerisland.md#no-replicas"
+            labels:
+              severity: critical
+              team: platform
             isPaused: false
 
           - uid: slo-latency-breach
@@ -378,8 +467,584 @@ data:
             annotations:
               summary: "SLO: p99 latency above 500ms for 10 minutes"
               description: "Current p99: {{ $value | humanizeDuration }}"
+              runbook: "docs/runbooks/peerisland.md#backend-high-latency"
             labels:
               severity: warning
               team: platform
               slo: latency
+            isPaused: false
+
+      - name: peerisland-nodes
+        folder: PeerIsland
+        orgId: 1
+        interval: 1m
+        rules:
+
+          - uid: node-not-ready
+            title: NodeNotReady
+            condition: A
+            data:
+              - refId: A
+                datasourceUid: mimir
+                relativeTimeRange: {from: 300, to: 0}
+                model:
+                  expr: 'kube_node_status_condition{condition="Ready",status="true"} == 0'
+                  instant: true
+                  refId: A
+            for: 5m
+            noDataState: NoData
+            execErrState: Error
+            annotations:
+              summary: "Node {{ $labels.node }} is NotReady"
+              description: "Node has been in NotReady state for more than 5 minutes."
+              runbook: "docs/runbooks/peerisland.md#node-not-ready"
+            labels:
+              severity: critical
+              team: platform
+            isPaused: false
+
+          - uid: node-high-cpu
+            title: NodeHighCPU
+            condition: A
+            data:
+              - refId: A
+                datasourceUid: mimir
+                relativeTimeRange: {from: 900, to: 0}
+                model:
+                  expr: '1 - avg by(node) (rate(node_cpu_seconds_total{mode="idle"}[5m])) > 0.85'
+                  instant: true
+                  refId: A
+            for: 15m
+            noDataState: NoData
+            execErrState: Error
+            annotations:
+              summary: "Node {{ $labels.node }} CPU above 85%"
+              description: "Node CPU usage is {{ $value | humanizePercentage }} for more than 15 minutes."
+              runbook: "docs/runbooks/peerisland.md#node-high-cpu"
+            labels:
+              severity: warning
+              team: platform
+            isPaused: false
+
+          - uid: node-high-memory
+            title: NodeHighMemory
+            condition: A
+            data:
+              - refId: A
+                datasourceUid: mimir
+                relativeTimeRange: {from: 600, to: 0}
+                model:
+                  expr: '1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) > 0.90'
+                  instant: true
+                  refId: A
+            for: 10m
+            noDataState: NoData
+            execErrState: Error
+            annotations:
+              summary: "Node {{ $labels.node }} memory above 90%"
+              description: "Node memory usage is {{ $value | humanizePercentage }} for more than 10 minutes — OOM evictions likely."
+              runbook: "docs/runbooks/peerisland.md#node-high-memory"
+            labels:
+              severity: critical
+              team: platform
+            isPaused: false
+
+          - uid: node-disk-pressure
+            title: NodeDiskPressure
+            condition: A
+            data:
+              - refId: A
+                datasourceUid: mimir
+                relativeTimeRange: {from: 300, to: 0}
+                model:
+                  expr: 'kube_node_status_condition{condition="DiskPressure",status="true"} == 1'
+                  instant: true
+                  refId: A
+            for: 2m
+            noDataState: NoData
+            execErrState: Error
+            annotations:
+              summary: "Node {{ $labels.node }} is under disk pressure"
+              description: "kubelet is evicting pods due to low disk space."
+              runbook: "docs/runbooks/peerisland.md#node-disk-pressure"
+            labels:
+              severity: critical
+              team: platform
+            isPaused: false
+
+          - uid: node-disk-usage-high
+            title: NodeDiskUsageHigh
+            condition: A
+            data:
+              - refId: A
+                datasourceUid: mimir
+                relativeTimeRange: {from: 600, to: 0}
+                model:
+                  expr: '1 - (node_filesystem_avail_bytes{mountpoint="/",fstype!="tmpfs"} / node_filesystem_size_bytes{mountpoint="/",fstype!="tmpfs"}) > 0.85'
+                  instant: true
+                  refId: A
+            for: 10m
+            noDataState: NoData
+            execErrState: Error
+            annotations:
+              summary: "Node {{ $labels.node }} root filesystem {{ $value | humanizePercentage }} full"
+              description: "Disk will fill before disk pressure is triggered — clean logs or expand disk."
+              runbook: "docs/runbooks/peerisland.md#node-disk-pressure"
+            labels:
+              severity: warning
+              team: platform
+            isPaused: false
+
+      - name: peerisland-pod-scheduling
+        folder: PeerIsland
+        orgId: 1
+        interval: 1m
+        rules:
+
+          - uid: pod-stuck-pending
+            title: PodStuckPending
+            condition: A
+            data:
+              - refId: A
+                datasourceUid: mimir
+                relativeTimeRange: {from: 900, to: 0}
+                model:
+                  expr: 'kube_pod_status_phase{namespace=~"peerisland|monitoring|argocd|ingress-nginx",phase="Pending"} == 1'
+                  instant: true
+                  refId: A
+            for: 15m
+            noDataState: NoData
+            execErrState: Error
+            annotations:
+              summary: "Pod {{ $labels.pod }} in {{ $labels.namespace }} has been Pending for 15 minutes"
+              description: "Check events: kubectl describe pod {{ $labels.pod }} -n {{ $labels.namespace }}"
+              runbook: "docs/runbooks/peerisland.md#pod-stuck-pending"
+            labels:
+              severity: warning
+              team: platform
+            isPaused: false
+
+          - uid: pod-image-pull-backoff
+            title: PodImagePullBackOff
+            condition: A
+            data:
+              - refId: A
+                datasourceUid: mimir
+                relativeTimeRange: {from: 300, to: 0}
+                model:
+                  expr: 'kube_pod_container_status_waiting_reason{namespace=~"peerisland|monitoring|argocd|ingress-nginx",reason=~"ImagePullBackOff|ErrImagePull|InvalidImageName"} == 1'
+                  instant: true
+                  refId: A
+            for: 5m
+            noDataState: NoData
+            execErrState: Error
+            annotations:
+              summary: "Pod {{ $labels.pod }} container {{ $labels.container }} cannot pull image"
+              description: "Image pull failing in {{ $labels.namespace }}. Check image name, tag, and ACR credentials."
+              runbook: "docs/runbooks/peerisland.md#image-pull-backoff"
+            labels:
+              severity: critical
+              team: platform
+            isPaused: false
+
+          - uid: pod-unschedulable
+            title: PodUnschedulable
+            condition: A
+            data:
+              - refId: A
+                datasourceUid: mimir
+                relativeTimeRange: {from: 600, to: 0}
+                model:
+                  expr: 'kube_pod_status_unschedulable{namespace=~"peerisland|monitoring|argocd"} == 1'
+                  instant: true
+                  refId: A
+            for: 10m
+            noDataState: NoData
+            execErrState: Error
+            annotations:
+              summary: "Pod {{ $labels.pod }} in {{ $labels.namespace }} is unschedulable"
+              description: "No node has sufficient resources. Check node capacity or HPA/resource limits."
+              runbook: "docs/runbooks/peerisland.md#pod-stuck-pending"
+            labels:
+              severity: critical
+              team: platform
+            isPaused: false
+
+      - name: peerisland-ingress
+        folder: PeerIsland
+        orgId: 1
+        interval: 1m
+        rules:
+
+          - uid: ingress-high-error-rate
+            title: IngressHighErrorRate
+            condition: A
+            data:
+              - refId: A
+                datasourceUid: mimir
+                relativeTimeRange: {from: 300, to: 0}
+                model:
+                  expr: |
+                    sum(rate(nginx_ingress_controller_requests{status=~"5.."}[5m]))
+                    /
+                    sum(rate(nginx_ingress_controller_requests[5m])) > 0.05
+                  instant: true
+                  refId: A
+            for: 5m
+            noDataState: NoData
+            execErrState: Error
+            annotations:
+              summary: "Ingress NGINX 5xx rate above 5%"
+              description: "Global ingress error rate is {{ $value | humanizePercentage }}."
+              runbook: "docs/runbooks/peerisland.md#ingress-high-error-rate"
+            labels:
+              severity: critical
+              team: platform
+            isPaused: false
+
+          - uid: ingress-high-latency
+            title: IngressHighLatencyP99
+            condition: A
+            data:
+              - refId: A
+                datasourceUid: mimir
+                relativeTimeRange: {from: 600, to: 0}
+                model:
+                  expr: |
+                    histogram_quantile(0.99,
+                      sum by(le, ingress) (rate(nginx_ingress_controller_request_duration_seconds_bucket[5m]))
+                    ) > 2
+                  instant: true
+                  refId: A
+            for: 10m
+            noDataState: NoData
+            execErrState: Error
+            annotations:
+              summary: "Ingress {{ $labels.ingress }} p99 latency above 2 seconds"
+              description: "NGINX is spending > 2s on p99 requests — backend or timeout issue."
+              runbook: "docs/runbooks/peerisland.md#ingress-high-latency"
+            labels:
+              severity: warning
+              team: platform
+            isPaused: false
+
+          - uid: ingress-controller-down
+            title: IngressControllerDown
+            condition: C
+            data:
+              - refId: A
+                datasourceUid: mimir
+                relativeTimeRange: {from: 300, to: 0}
+                model:
+                  expr: 'sum(kube_pod_status_phase{namespace="ingress-nginx",phase="Running"})'
+                  instant: true
+                  refId: A
+              - refId: C
+                datasourceUid: __expr__
+                model: {refId: C, type: math, expression: "$A < 1"}
+            for: 2m
+            noDataState: Alerting
+            execErrState: Error
+            annotations:
+              summary: "No ingress-nginx pods running — cluster is unreachable"
+              description: "All NGINX pods are down. All HTTP/HTTPS traffic is blocked."
+              runbook: "docs/runbooks/peerisland.md#ingress-controller-down"
+            labels:
+              severity: critical
+              team: platform
+            isPaused: false
+
+      - name: peerisland-monitoring-stack
+        folder: PeerIsland
+        orgId: 1
+        interval: 1m
+        rules:
+
+          - uid: mimir-down
+            title: MimirDown
+            condition: C
+            data:
+              - refId: A
+                datasourceUid: mimir
+                relativeTimeRange: {from: 300, to: 0}
+                model:
+                  expr: 'sum(kube_pod_status_phase{namespace="monitoring",pod=~"mimir-.*",phase="Running"})'
+                  instant: true
+                  refId: A
+              - refId: C
+                datasourceUid: __expr__
+                model: {refId: C, type: math, expression: "$A < 1"}
+            for: 5m
+            noDataState: Alerting
+            execErrState: Error
+            annotations:
+              summary: "Mimir has no running pods — metrics storage is down"
+              description: "All alerts and dashboards backed by Mimir will stop working."
+              runbook: "docs/runbooks/peerisland.md#mimir-down"
+            labels:
+              severity: critical
+              team: platform
+            isPaused: false
+
+          - uid: loki-down
+            title: LokiDown
+            condition: C
+            data:
+              - refId: A
+                datasourceUid: mimir
+                relativeTimeRange: {from: 300, to: 0}
+                model:
+                  expr: 'sum(kube_pod_status_phase{namespace="monitoring",pod=~"loki-.*",phase="Running"})'
+                  instant: true
+                  refId: A
+              - refId: C
+                datasourceUid: __expr__
+                model: {refId: C, type: math, expression: "$A < 1"}
+            for: 5m
+            noDataState: Alerting
+            execErrState: Error
+            annotations:
+              summary: "Loki has no running pods — log storage is down"
+              description: "Log dashboards and log-based alerts will stop working."
+              runbook: "docs/runbooks/peerisland.md#loki-down"
+            labels:
+              severity: critical
+              team: platform
+            isPaused: false
+
+          - uid: tempo-down
+            title: TempoDown
+            condition: C
+            data:
+              - refId: A
+                datasourceUid: mimir
+                relativeTimeRange: {from: 300, to: 0}
+                model:
+                  expr: 'sum(kube_pod_status_phase{namespace="monitoring",pod=~"tempo-.*",phase="Running"})'
+                  instant: true
+                  refId: A
+              - refId: C
+                datasourceUid: __expr__
+                model: {refId: C, type: math, expression: "$A < 1"}
+            for: 5m
+            noDataState: Alerting
+            execErrState: Error
+            annotations:
+              summary: "Tempo has no running pods — trace storage is down"
+              description: "Trace-linked exemplars and TraceQL queries will stop working."
+              runbook: "docs/runbooks/peerisland.md#tempo-down"
+            labels:
+              severity: warning
+              team: platform
+            isPaused: false
+
+          - uid: alloy-daemonset-not-ready
+            title: AlloyDaemonSetNotReady
+            condition: A
+            data:
+              - refId: A
+                datasourceUid: mimir
+                relativeTimeRange: {from: 300, to: 0}
+                model:
+                  expr: |
+                    kube_daemonset_status_number_ready{namespace="monitoring",daemonset="alloy"}
+                    /
+                    kube_daemonset_status_desired_number_scheduled{namespace="monitoring",daemonset="alloy"} < 0.5
+                  instant: true
+                  refId: A
+            for: 10m
+            noDataState: NoData
+            execErrState: Error
+            annotations:
+              summary: "Less than 50% of Alloy pods are ready"
+              description: "Nodes with unhealthy Alloy pods will stop sending metrics and logs."
+              runbook: "docs/runbooks/peerisland.md#alloy-not-ready"
+            labels:
+              severity: critical
+              team: platform
+            isPaused: false
+
+          - uid: argocd-out-of-sync
+            title: ArgoCDAppOutOfSync
+            condition: A
+            data:
+              - refId: A
+                datasourceUid: mimir
+                relativeTimeRange: {from: 600, to: 0}
+                model:
+                  expr: 'argocd_app_info{sync_status="OutOfSync"} == 1'
+                  instant: true
+                  refId: A
+            for: 10m
+            noDataState: NoData
+            execErrState: Error
+            annotations:
+              summary: "ArgoCD app {{ $labels.name }} is OutOfSync"
+              description: "App has been OutOfSync for >10 min. Check ArgoCD UI or run argocd app sync {{ $labels.name }}."
+              runbook: "docs/runbooks/peerisland.md#argocd-out-of-sync"
+            labels:
+              severity: warning
+              team: platform
+            isPaused: false
+
+          - uid: argocd-sync-failed
+            title: ArgoCDAppSyncFailed
+            condition: A
+            data:
+              - refId: A
+                datasourceUid: mimir
+                relativeTimeRange: {from: 300, to: 0}
+                model:
+                  expr: 'argocd_app_info{operation_phase=~"Error|Failed"} == 1'
+                  instant: true
+                  refId: A
+            for: 5m
+            noDataState: NoData
+            execErrState: Error
+            annotations:
+              summary: "ArgoCD app {{ $labels.name }} sync failed"
+              description: "Last sync phase={{ $labels.operation_phase }}. Check ArgoCD for the error message."
+              runbook: "docs/runbooks/peerisland.md#argocd-sync-failed"
+            labels:
+              severity: critical
+              team: platform
+            isPaused: false
+
+          - uid: argocd-global-rpc-error
+            title: ArgoCDGlobalRPCError
+            condition: A
+            data:
+              - refId: A
+                datasourceUid: mimir
+                relativeTimeRange: {from: 300, to: 0}
+                model:
+                  expr: |
+                    (count(argocd_app_info{health_status="Unknown"}) / count(argocd_app_info)) > 0.4
+                  instant: true
+                  refId: A
+            for: 2m
+            noDataState: NoData
+            execErrState: Error
+            annotations:
+              summary: "ArgoCD global RPC error — {{ $value | humanizePercentage }} of apps Unknown"
+              description: "Stale gRPC connections after repo-server restart. Fix: kubectl rollout restart statefulset argocd-application-controller -n argocd"
+              runbook: "docs/runbooks/peerisland.md#argocd-rpc-error"
+            labels:
+              severity: critical
+              team: platform
+            isPaused: false
+
+          - uid: argocd-repo-server-oom
+            title: ArgoCDRepoServerRestarting
+            condition: A
+            data:
+              - refId: A
+                datasourceUid: mimir
+                relativeTimeRange: {from: 1800, to: 0}
+                model:
+                  expr: 'increase(kube_pod_container_status_restarts_total{namespace="argocd",container="argocd-repo-server"}[30m]) > 1'
+                  instant: true
+                  refId: A
+            for: 0s
+            noDataState: NoData
+            execErrState: Error
+            annotations:
+              summary: "ArgoCD repo-server restarted {{ $value | humanize }} times in 30 min"
+              description: "Likely OOMKilled. Triggers global RPC errors. Fix: increase repoServer.resources.limits.memory in argocd-values.yaml."
+              runbook: "docs/runbooks/peerisland.md#argocd-repo-server-oom"
+            labels:
+              severity: critical
+              team: platform
+            isPaused: false
+
+          - uid: argocd-repo-server-high-memory
+            title: ArgoCDRepoServerHighMemory
+            condition: A
+            data:
+              - refId: A
+                datasourceUid: mimir
+                relativeTimeRange: {from: 300, to: 0}
+                model:
+                  expr: 'container_memory_working_set_bytes{namespace="argocd",container="argocd-repo-server"} > 471859200'
+                  instant: true
+                  refId: A
+            for: 5m
+            noDataState: NoData
+            execErrState: Error
+            annotations:
+              summary: "ArgoCD repo-server memory >450Mi on {{ $labels.pod }}"
+              description: "Memory is {{ $value | humanize1024 }}. Limit is 512Mi — close to OOM. Consider raising the limit."
+              runbook: "docs/runbooks/peerisland.md#argocd-repo-server-oom"
+            labels:
+              severity: warning
+              team: platform
+            isPaused: false
+
+          - uid: argocd-repo-server-high-cpu
+            title: ArgoCDRepoServerHighCPU
+            condition: A
+            data:
+              - refId: A
+                datasourceUid: mimir
+                relativeTimeRange: {from: 600, to: 0}
+                model:
+                  expr: 'rate(container_cpu_usage_seconds_total{namespace="argocd",container="argocd-repo-server"}[5m]) > 0.8'
+                  instant: true
+                  refId: A
+            for: 10m
+            noDataState: NoData
+            execErrState: Error
+            annotations:
+              summary: "ArgoCD repo-server CPU >80% on {{ $labels.pod }}"
+              description: "High CPU during large syncs can cause manifest timeouts."
+              runbook: "docs/runbooks/peerisland.md#argocd-repo-server-oom"
+            labels:
+              severity: warning
+              team: platform
+            isPaused: false
+
+          - uid: argocd-controller-high-memory
+            title: ArgoCDControllerHighMemory
+            condition: A
+            data:
+              - refId: A
+                datasourceUid: mimir
+                relativeTimeRange: {from: 300, to: 0}
+                model:
+                  expr: 'container_memory_working_set_bytes{namespace="argocd",container="argocd-application-controller"} > 891289600'
+                  instant: true
+                  refId: A
+            for: 5m
+            noDataState: NoData
+            execErrState: Error
+            annotations:
+              summary: "ArgoCD application-controller memory >850Mi"
+              description: "Memory is {{ $value | humanize1024 }}. Limit is 1Gi — approaching OOM."
+              runbook: "docs/runbooks/peerisland.md#argocd-controller-oom"
+            labels:
+              severity: warning
+              team: platform
+            isPaused: false
+
+          - uid: argocd-controller-oom
+            title: ArgoCDControllerRestarting
+            condition: A
+            data:
+              - refId: A
+                datasourceUid: mimir
+                relativeTimeRange: {from: 1800, to: 0}
+                model:
+                  expr: 'increase(kube_pod_container_status_restarts_total{namespace="argocd",container="argocd-application-controller"}[30m]) > 0'
+                  instant: true
+                  refId: A
+            for: 0s
+            noDataState: NoData
+            execErrState: Error
+            annotations:
+              summary: "ArgoCD application-controller restarted"
+              description: "All app reconciliation pauses until it recovers. Check: kubectl describe pod -n argocd -l app.kubernetes.io/name=argocd-application-controller"
+              runbook: "docs/runbooks/peerisland.md#argocd-controller-oom"
+            labels:
+              severity: critical
+              team: platform
             isPaused: false

@@ -74,6 +74,11 @@ discovery.relabel "annotated_pods" {
     target_label  = "service"
   }
   rule {
+    source_labels = ["__meta_kubernetes_pod_label_k8s_app"]
+    regex         = "(.+)"
+    target_label  = "service"
+  }
+  rule {
     source_labels = ["__meta_kubernetes_pod_label_app"]
     regex         = "(.+)"
     target_label  = "service"
@@ -128,6 +133,11 @@ discovery.relabel "named_metrics_port" {
   }
   rule {
     source_labels = ["__meta_kubernetes_pod_controller_name"]
+    regex         = "(.+)"
+    target_label  = "service"
+  }
+  rule {
+    source_labels = ["__meta_kubernetes_pod_label_k8s_app"]
     regex         = "(.+)"
     target_label  = "service"
   }
@@ -341,6 +351,11 @@ discovery.relabel "pod_logs" {
   }
   rule {
     source_labels = ["__meta_kubernetes_pod_controller_name"]
+    regex         = "(.+)"
+    target_label  = "service"
+  }
+  rule {
+    source_labels = ["__meta_kubernetes_pod_label_k8s_app"]
     regex         = "(.+)"
     target_label  = "service"
   }

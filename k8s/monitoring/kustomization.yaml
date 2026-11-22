@@ -4,7 +4,10 @@ kind: Kustomization
 resources:
   - otel-collector-service.yaml
   - secret-provider-grafana.yaml
+  - mimir-recording-rules.yaml
   - grafana-alert-rules.yaml
   - grafana-dashboards.yaml
+  - dashboard-tracing.yaml
+  - dashboard-daily-report.yaml
   - network-policies.yaml
   - daily-report-cronjob.yaml
