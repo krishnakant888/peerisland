@@ -2,8 +2,8 @@
 // Endpoints and the cluster name come from environment variables set in alloy-values.yaml:
 //   CLUSTER          — cluster label added to every series and log line
 //   MIMIR_PUSH_URL   — http://mimir.monitoring.svc.cluster.local:8080/api/v1/push
-//   LOKI_PUSH_URL    — http://loki.monitoring.svc.cluster.local:3100/loki/api/v1/push
-//   TEMPO_OTLP       — tempo.monitoring.svc.cluster.local:4317
+//   LOKI_PUSH_URL    — http://monitoring-loki.monitoring.svc.cluster.local:3100/loki/api/v1/push
+//   TEMPO_OTLP       — monitoring-tempo.monitoring.svc.cluster.local:4317
 //
 // Every series and log line carries a cluster label — if the cluster is later split or joined
 // to a central Mimir/Loki, the label already exists.

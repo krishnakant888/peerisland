@@ -45,9 +45,9 @@ alloy:
     - name: MIMIR_PUSH_URL
       value: "http://mimir.monitoring.svc.cluster.local:8080/api/v1/push"
     - name: LOKI_PUSH_URL
-      value: "http://loki.monitoring.svc.cluster.local:3100/loki/api/v1/push"
+      value: "http://monitoring-loki.monitoring.svc.cluster.local:3100/loki/api/v1/push"
     - name: TEMPO_OTLP
-      value: "tempo.monitoring.svc.cluster.local:4317"
+      value: "monitoring-tempo.monitoring.svc.cluster.local:4317"
   securityContext:
     allowPrivilegeEscalation: false
     readOnlyRootFilesystem: true
