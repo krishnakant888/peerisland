@@ -42,6 +42,7 @@ resource "azurerm_subnet" "pe" {
 }
 
 resource "azurerm_network_security_group" "aks" {
+  #checkov:skip=CKV_AZURE_160: Port 80 required for NGINX HTTP→HTTPS redirect and Let's Encrypt ACME HTTP-01 challenge
   name                = "${var.name_prefix}-aks-nsg"
   location            = var.location
   resource_group_name = var.resource_group_name
@@ -111,4 +112,91 @@ resource "azurerm_network_security_group" "aks" {
 resource "azurerm_subnet_network_security_group_association" "aks" {
   subnet_id                 = azurerm_subnet.aks.id
   network_security_group_id = azurerm_network_security_group.aks.id
+}
+
+# NSG for private-endpoint subnet — deny all inbound except VNet-internal traffic.
+# Private endpoints are accessed via private link; no public inbound needed.
+resource "azurerm_network_security_group" "pe" {
+  name                = "${var.name_prefix}-pe-nsg"
+  location            = var.location
+  resource_group_name = var.resource_group_name
+  tags                = var.tags
+
+  security_rule {
+    name                       = "allow-vnet-inbound"
+    priority                   = 100
+    direction                  = "Inbound"
+    access                     = "Allow"
+    protocol                   = "*"
+    source_port_range          = "*"
+    destination_port_range     = "*"
+    source_address_prefix      = "VirtualNetwork"
+    destination_address_prefix = "VirtualNetwork"
+  }
+
+  security_rule {
+    name                       = "deny-all-inbound"
+    priority                   = 4096
+    direction                  = "Inbound"
+    access                     = "Deny"
+    protocol                   = "*"
+    source_port_range          = "*"
+    destination_port_range     = "*"
+    source_address_prefix      = "*"
+    destination_address_prefix = "*"
+  }
+}
+
+resource "azurerm_subnet_network_security_group_association" "pe" {
+  subnet_id                 = azurerm_subnet.pe.id
+  network_security_group_id = azurerm_network_security_group.pe.id
+}
+
+# NSG for Application Gateway subnet — allow HTTPS inbound and GatewayManager.
+resource "azurerm_network_security_group" "appgw" {
+  name                = "${var.name_prefix}-appgw-nsg"
+  location            = var.location
+  resource_group_name = var.resource_group_name
+  tags                = var.tags
+
+  security_rule {
+    name                       = "allow-https-inbound"
+    priority                   = 100
+    direction                  = "Inbound"
+    access                     = "Allow"
+    protocol                   = "Tcp"
+    source_port_range          = "*"
+    destination_port_range     = "443"
+    source_address_prefix      = "Internet"
+    destination_address_prefix = "*"
+  }
+
+  security_rule {
+    name                       = "allow-gateway-manager"
+    priority                   = 110
+    direction                  = "Inbound"
+    access                     = "Allow"
+    protocol                   = "Tcp"
+    source_port_range          = "*"
+    destination_port_range     = "65200-65535"
+    source_address_prefix      = "GatewayManager"
+    destination_address_prefix = "*"
+  }
+
+  security_rule {
+    name                       = "deny-all-inbound"
+    priority                   = 4096
+    direction                  = "Inbound"
+    access                     = "Deny"
+    protocol                   = "*"
+    source_port_range          = "*"
+    destination_port_range     = "*"
+    source_address_prefix      = "*"
+    destination_address_prefix = "*"
+  }
+}
+
+resource "azurerm_subnet_network_security_group_association" "appgw" {
+  subnet_id                 = azurerm_subnet.appgw.id
+  network_security_group_id = azurerm_network_security_group.appgw.id
 }

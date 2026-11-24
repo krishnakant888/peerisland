@@ -10,37 +10,6 @@ locals {
   common_tags = merge(var.tags, { Environment = var.environment })
 }
 
-import {
-  to = azurerm_resource_group.main
-  id = "/subscriptions/${local.sub}/resourceGroups/${local.rg}"
-}
-
-import {
-  to = azurerm_log_analytics_workspace.main
-  id = "/subscriptions/${local.sub}/resourceGroups/${local.rg}/providers/Microsoft.OperationalInsights/workspaces/${local.pfx}-law"
-}
-
-import {
-  to = module.networking.azurerm_virtual_network.main
-  id = "/subscriptions/${local.sub}/resourceGroups/${local.rg}/providers/Microsoft.Network/virtualNetworks/${local.pfx}-vnet"
-}
-
-import {
-  for_each = var.key_vault_suffix != "" ? toset(["kv"]) : toset([])
-  to       = module.keyvault.azurerm_key_vault.main
-  id       = "/subscriptions/${local.sub}/resourceGroups/${local.rg}/providers/Microsoft.KeyVault/vaults/${local.pfx}-kv-${var.key_vault_suffix}"
-}
-
-import {
-  to = module.acr.azurerm_container_registry.main
-  id = "/subscriptions/${local.sub}/resourceGroups/${local.rg}/providers/Microsoft.ContainerRegistry/registries/${replace("${local.pfx}acr", "-", "")}"
-}
-
-import {
-  to = module.aks.azurerm_kubernetes_cluster.main
-  id = "/subscriptions/${local.sub}/resourceGroups/${local.rg}/providers/Microsoft.ContainerService/managedClusters/${local.pfx}-aks"
-}
-
 
 data "azurerm_client_config" "current" {}
 data "azurerm_subscription" "current" {}
@@ -162,6 +131,11 @@ resource "azuread_service_principal" "cicd" {
   client_id = azuread_application.cicd.client_id
 }
 
+import {
+  to = azuread_application_federated_identity_credential.github_main
+  id = "d3389612-559a-4f7f-a903-a1af271ee122/federatedIdentityCredential/4f439d04-ae63-43bf-ac5f-008b7459288d"
+}
+
 resource "azuread_application_federated_identity_credential" "github_main" {
   application_id = azuread_application.cicd.id
   display_name   = "github-main"
@@ -191,15 +165,27 @@ resource "azurerm_role_assignment" "cicd_acr_push" {
 resource "azurerm_key_vault_secret" "grafana_admin_user" {
   name         = "grafana-admin-user"
   value        = var.grafana_admin_user
+  content_type = "text/plain"
   key_vault_id = module.keyvault.id
 
+  # checkov:skip=CKV_AZURE_41: Credential rotated via tfvars, not by expiry policy
   depends_on = [module.keyvault]
+
+  lifecycle {
+    ignore_changes = [value]
+  }
 }
 
 resource "azurerm_key_vault_secret" "grafana_admin_password" {
   name         = "grafana-admin-password"
   value        = var.grafana_admin_password
+  content_type = "text/plain"
   key_vault_id = module.keyvault.id
 
+  # checkov:skip=CKV_AZURE_41: Credential rotated via tfvars, not by expiry policy
   depends_on = [module.keyvault]
+
+  lifecycle {
+    ignore_changes = [value]
+  }
 }

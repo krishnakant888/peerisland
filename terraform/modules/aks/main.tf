@@ -14,6 +14,15 @@ resource "random_string" "system_node_pool_tmp" {
 }
 
 resource "azurerm_kubernetes_cluster" "main" {
+  #checkov:skip=CKV_AZURE_115: Public API server, IP-restricted — private cluster needs VPN/jumpbox, incompatible with CI/CD
+  #checkov:skip=CKV_AZURE_116: Azure Policy add-on adds cost/complexity for a demo stack
+  #checkov:skip=CKV_AZURE_117: Customer-managed disk encryption adds KMS operational overhead
+  #checkov:skip=CKV_AZURE_227: Host-based encryption requires EncryptionAtHost feature flag per subscription
+  #checkov:skip=CKV_AZURE_226: Ephemeral OS disks unsupported on D2s_v5 with 128GB OS disk size
+  #checkov:skip=CKV_AZURE_170: Paid (Uptime SLA) tier not required for a demo/interview stack
+  #checkov:skip=CKV_AZURE_168: max_pods set to AKS default (30 system pool); user pool has 110
+  #checkov:skip=CKV_AZURE_232: only_critical_addons_enabled would block LGTM/app workloads on the system pool
+  #checkov:skip=CKV_AZURE_171: Upgrade channel managed manually — auto-upgrade not suitable for a pinned k8s version
   name                = "${var.name_prefix}-aks"
   location            = var.location
   resource_group_name = var.resource_group_name
@@ -135,12 +144,15 @@ data "azurerm_user_assigned_identity" "kv_secrets_provider" {
 }
 
 resource "azurerm_federated_identity_credential" "grafana_kv" {
-  name                = "grafana-workload-identity"
-  resource_group_name = azurerm_kubernetes_cluster.main.node_resource_group
-  parent_id           = data.azurerm_user_assigned_identity.kv_secrets_provider.id
+  name                        = "grafana-workload-identity"
+  user_assigned_identity_id   = data.azurerm_user_assigned_identity.kv_secrets_provider.id
   issuer              = azurerm_kubernetes_cluster.main.oidc_issuer_url
   subject             = "system:serviceaccount:monitoring:monitoring-grafana"
   audience            = ["api://AzureADTokenExchange"]
+
+  lifecycle {
+    ignore_changes = [user_assigned_identity_id]
+  }
 }
 
 # Find all NSGs that AKS created in the node resource group.
@@ -155,6 +167,7 @@ data "azurerm_resources" "aks_node_nsgs" {
 }
 
 resource "azurerm_network_security_rule" "aks_allow_http" {
+  #checkov:skip=CKV_AZURE_160: Port 80 required for NGINX HTTP→HTTPS redirect and Let's Encrypt ACME HTTP-01 challenge
   for_each = { "aks_node_nsg" = true }
 
   name                        = "Allow-HTTP-Inbound"
@@ -168,6 +181,10 @@ resource "azurerm_network_security_rule" "aks_allow_http" {
   destination_address_prefix  = "*"
   resource_group_name         = azurerm_kubernetes_cluster.main.node_resource_group
   network_security_group_name = data.azurerm_resources.aks_node_nsgs.resources[0].name
+
+  lifecycle {
+    ignore_changes = [network_security_group_name]
+  }
 }
 
 resource "azurerm_network_security_rule" "aks_allow_https" {
@@ -184,6 +201,10 @@ resource "azurerm_network_security_rule" "aks_allow_https" {
   destination_address_prefix  = "*"
   resource_group_name         = azurerm_kubernetes_cluster.main.node_resource_group
   network_security_group_name = data.azurerm_resources.aks_node_nsgs.resources[0].name
+
+  lifecycle {
+    ignore_changes = [network_security_group_name]
+  }
 }
 
 
@@ -204,6 +225,7 @@ resource "random_string" "user_node_pool_tmp" {
 }
 
 resource "azurerm_kubernetes_cluster_node_pool" "user" {
+  #checkov:skip=CKV_AZURE_227: Host-based encryption requires EncryptionAtHost feature flag per subscription
   name                        = "user"
   temporary_name_for_rotation = "t${random_string.user_node_pool_tmp.result}"
   kubernetes_cluster_id       = azurerm_kubernetes_cluster.main.id

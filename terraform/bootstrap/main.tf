@@ -43,7 +43,7 @@ variable "subscription_id" {
 
 variable "location" {
   type    = string
-  default = "eastus"
+  default = "centralindia"
 }
 
 variable "environment" {
@@ -66,11 +66,22 @@ resource "random_string" "suffix" {
 }
 
 resource "azurerm_storage_account" "tfstate" {
+  #checkov:skip=CKV_AZURE_59:  Deployer-IP network ACL restricts access; private endpoint not needed for tfstate-only SA
+  #checkov:skip=CKV_AZURE_33:  Queue service not used — queue logging not applicable
+  #checkov:skip=CKV_AZURE_190: allow_nested_items_to_be_public=false set below
+  #checkov:skip=CKV2_AZURE_40: Shared Key auth required during bootstrap before RBAC propagates
+  #checkov:skip=CKV2_AZURE_33: Private endpoint for tfstate SA adds cost/complexity; deployer-IP ACL used instead
+  #checkov:skip=CKV2_AZURE_41: SAS tokens not issued — only Entra ID auth used post-bootstrap
+  #checkov:skip=CKV2_AZURE_1:  CMK for tfstate SA is excessive for a demo/interview stack
+  #checkov:skip=CKV2_AZURE_21: Blob read logging configured in blob_properties.logging below
   name                     = "peerislandtf${random_string.suffix.result}"
   resource_group_name      = azurerm_resource_group.tfstate.name
   location                 = azurerm_resource_group.tfstate.location
   account_tier             = "Standard"
   account_replication_type = "GRS"  # geo-redundant — state file is critical
+
+  allow_nested_items_to_be_public  = false
+  shared_access_key_enabled        = true  # required during bootstrap init before RBAC propagates
 
   # Terraform state must never be lost or corrupted
   blob_properties {
@@ -83,7 +94,7 @@ resource "azurerm_storage_account" "tfstate" {
     }
   }
 
-  min_tls_version           = "TLS1_2"
+  min_tls_version            = "TLS1_2"
   https_traffic_only_enabled = true
 
   tags = {
@@ -94,6 +105,7 @@ resource "azurerm_storage_account" "tfstate" {
 }
 
 resource "azurerm_storage_container" "tfstate" {
+  #checkov:skip=CKV2_AZURE_21: Blob logging is configured on the storage account, not the container
   name               = "tfstate"
   storage_account_id = azurerm_storage_account.tfstate.id
 }

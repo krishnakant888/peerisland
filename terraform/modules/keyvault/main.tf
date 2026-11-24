@@ -5,6 +5,7 @@ resource "random_string" "kv_suffix" {
 }
 
 resource "azurerm_key_vault" "main" {
+  #checkov:skip=CKV2_AZURE_32: Private endpoint for KV provisioned in modules/privateendpoints — not visible from this module
   # suffix: use override from tfvars if set (for state-loss recovery), else random on first create
   name = "${var.name_prefix}-kv-${var.key_vault_suffix != "" ? var.key_vault_suffix : random_string.kv_suffix.result}"
   location                    = var.location
