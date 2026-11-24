@@ -86,12 +86,6 @@ variable "github_repo" {
   default     = "peerisland"
 }
 
-variable "letsencrypt_email" {
-  description = "Email address for Let's Encrypt / cert-manager ACME registration"
-  type        = string
-  default     = ""
-}
-
 variable "key_vault_suffix" {
   description = "Pin KV name suffix after state loss (e.g. 'sqxc'). Empty = let terraform generate one."
   type        = string

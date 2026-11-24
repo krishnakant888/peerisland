@@ -4,7 +4,6 @@
 # terraform import needed. Idempotent: once in state they become no-ops.
 locals {
   sub         = var.subscription_id
-  pfx         = "${var.project_name}-${var.environment}"
   rg          = "${var.project_name}-${var.environment}-rg"
   name_prefix = "${var.project_name}-${var.environment}"
   common_tags = merge(var.tags, { Environment = var.environment })
