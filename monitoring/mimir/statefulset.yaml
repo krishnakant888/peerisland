@@ -1,3 +1,29 @@
+# ── Mimir StatefulSet ─────────────────────────────────────────────────────────
+#
+# PURPOSE: Runs the Mimir metrics backend as a StatefulSet so it gets a stable
+#   identity (mimir-0) and a persistent volume that survives pod restarts.
+#
+# WHY StatefulSet, not Deployment?
+#   Mimir writes TSDB blocks to disk.  If a Deployment pod is rescheduled to a
+#   different node, its PVC would need to follow it — PVCs are zone-pinned on
+#   Azure (managed-premium uses LRS).  StatefulSet with volumeClaimTemplates
+#   guarantees the same pod name always gets the same PVC, so blocks stay intact.
+#
+# nodeSelector: kubernetes.azure.com/mode: user — prevents Mimir from landing
+#   on the system node pool (which is sized for kube-system only).
+#
+# NON-ROOT (runAsUser: 10001): Mimir container image supports a non-root user.
+#   capabilities.drop: [ALL] removes all Linux capabilities — the process cannot
+#   bind privileged ports, write to kernel parameters, or escalate privileges.
+#
+# RESOURCES: 500m CPU / 512Mi request is sufficient for a single-cluster stack.
+#   The 2 vCPU / 2Gi limit gives headroom for compaction spikes.
+#   VPA is NOT applied to Mimir — it uses explicit PVC storage, and VPA
+#   can't right-size storage requests.
+#
+# PVC (20Gi, managed-premium): Azure Premium SSD for low-latency writes.
+#   Mimir's WAL flushes synchronously on ingestion — slow storage = latency spike.
+#
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:

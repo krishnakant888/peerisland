@@ -1,10 +1,32 @@
+# ── Grafana Ingress ───────────────────────────────────────────────────────────
+#
+# PURPOSE: Exposes the Grafana dashboard at /grafana on the same public hostname
+#   as the application and ArgoCD UI.  All three share one nginx controller.
+#
+# WHY proxy-read-timeout: "3600"?
+#   Grafana's live dashboard streaming (SSE / websockets for panel updates) holds
+#   connections open for minutes.  The default nginx timeout is 60s — that's
+#   enough to drop a user mid-session while they're watching metrics roll in.
+#   3600s (1h) keeps WebSocket and SSE connections alive across a full work session.
+#
+# NOTE: No backend-protocol: HTTPS here (unlike ArgoCD) because the Grafana
+#   Helm chart deploys an HTTP listener on port 80 by default.  TLS is handled
+#   by nginx → cert-manager → ZeroSSL, not by Grafana itself.
+#
+# SECRET grafana-tls: created by cert-manager when it provisions the ZeroSSL cert
+#   for peerisland.centralindia.cloudapp.azure.com.  Both grafana-tls and argocd-tls
+#   reference the same hostname but are separate secrets — each Ingress gets its own
+#   cert object so they can renew independently.
+#
+# HOW DEPLOYED: synced by ArgoCD Application `ingresses` via argocd/applications/ingresses.yaml
+#
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: grafana
   namespace: monitoring
   annotations:
-    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"  # keeps dashboard SSE/WS alive
     cert-manager.io/cluster-issuer: "zerossl"
 spec:
   ingressClassName: nginx

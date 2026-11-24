@@ -1,3 +1,27 @@
+# ── terraform/bootstrap — remote state infrastructure ─────────────────────────
+#
+# PURPOSE: Provisions the Azure Storage Account that holds the MAIN Terraform
+#   state file.  This is a classic "chicken-and-egg" problem: the main config
+#   needs remote state before it can run, so bootstrap uses LOCAL state only.
+#
+# WHY a separate bootstrap directory?
+#   If this was part of the main terraform config, Terraform couldn't init
+#   (can't read a backend that doesn't exist yet).  The two-step approach
+#   (bootstrap with local state → main config with remote state) is the
+#   recommended pattern for teams starting from scratch.
+#
+# GRS (geo-redundant) replication: Terraform state is the single source of truth
+#   for all infrastructure.  If it's lost, resources become unmanaged orphans.
+#   GRS copies blobs to a secondary Azure region for disaster recovery.
+#
+# Blob versioning + 30-day retention: accidental state corruption can be
+#   rolled back to any previous version within 30 days.
+#
+# USAGE (one-time):
+#   cd terraform/bootstrap && terraform init && terraform apply
+#   Copy storage_account_name output → providers.tf backend block
+#   cd .. && terraform init -reconfigure
+#
 # Run this ONCE before the main terraform config.
 # It creates the storage account that will hold the main Terraform state file.
 #

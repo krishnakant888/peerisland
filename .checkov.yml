@@ -1,3 +1,27 @@
+# ── Checkov configuration ─────────────────────────────────────────────────────
+#
+# PURPOSE: Configures the static analysis tool that scans Terraform for
+#   security misconfigurations.  Run by GitHub Actions terraform-scan.yml
+#   workflow on every push to main.
+#
+# FRAMEWORK: terraform only — Kubernetes manifest scanning is a separate concern
+#   (use kubesec or kube-score for that).
+#
+# SARIF output: GitHub Actions uploads sarif to the Code Scanning tab so findings
+#   appear as inline PR annotations.  cli output also prints to the workflow log.
+#
+# soft-fail: false — the workflow FAILS if any non-skipped check fails.
+#   This enforces security-as-code: a misconfiguration blocks merge.
+#
+# compact: true — omits the multi-line detail block per finding; keeps CI logs readable.
+#
+# CKV_AZURE_168 (private cluster): a fully private AKS cluster requires a jump host
+#   (Bastion) or VPN to reach the API server.  This stack exposes the API server
+#   with authorized_ip_ranges instead — simpler to operate for a demo/interview
+#   project, with explicit IP allowlisting as the compensating control.
+#   Individual checkov:skip annotations inside .tf files handle all other skips
+#   with inline justification (see terraform/modules/aks/main.tf for examples).
+#
 framework:
   - terraform
 

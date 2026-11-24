@@ -1,3 +1,25 @@
+# ── Frontend Dockerfile ───────────────────────────────────────────────────────
+#
+# PURPOSE: Builds the production image for the frontend service.  The frontend
+#   is a Node.js Express server that serves static files from public/ — it's NOT
+#   an nginx static server.  Chosen for simplicity and to demonstrate the same
+#   healthcheck and non-root patterns as the backend.
+#
+# STRUCTURE matches backend Dockerfile exactly (two-stage, non-root, npm removed)
+#   with two differences:
+#   - port 3000 (backend is 3001)
+#   - Copies public/ (static assets: HTML, CSS, JS) in addition to src/
+#
+# STATIC FILE SERVER pattern (src/index.js):
+#   express.static serves everything in public/.
+#   Catch-all route (*) returns public/index.html — SPA behaviour so React Router
+#   (or any client-side router) handles path rendering without 404s on direct
+#   URL access.
+#
+# In production, an nginx-based image would be more efficient for static serving,
+#   but Express is used here to keep the Docker skill demonstration consistent
+#   between frontend and backend.
+#
 FROM node:20-alpine AS deps
 WORKDIR /app
 COPY package*.json ./

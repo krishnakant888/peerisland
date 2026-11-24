@@ -1,3 +1,13 @@
+# ── Mimir Kustomization ───────────────────────────────────────────────────────
+# Bundles the three Mimir manifests into one deployable unit for ArgoCD.
+# ArgoCD Application `monitoring-mimir` (argocd/applications/monitoring-mimir.yaml)
+# points here.  Order: configmap first so the StatefulSet can mount it on first sync.
+#
+# WHY plain manifests instead of the official Mimir Helm chart?
+#   The official chart deploys Mimir in microservices mode with 10+ StatefulSets.
+#   For this single-region, single-cluster stack, three hand-written files are
+#   easier to understand and debug than the chart's 1000+ rendered templates.
+#
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 

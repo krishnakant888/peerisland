@@ -1,5 +1,40 @@
 'use strict';
 
+// ── OpenTelemetry SDK initialisation ─────────────────────────────────────────
+//
+// PURPOSE: Bootstraps the OpenTelemetry SDK so every HTTP request handled by
+//   Express generates a distributed trace automatically.  This file must be
+//   required BEFORE express (and all other instrumented modules) — OTel works
+//   by patching require() at load time.
+//
+// DATA FLOW:
+//   App → (OTLP gRPC) → Alloy DaemonSet → Tempo backend → Grafana Explore
+//
+//   OTEL_EXPORTER_OTLP_ENDPOINT is set by the Rollout spec (env var):
+//     http://alloy.monitoring.svc.cluster.local:4317
+//   The gRPC endpoint must NOT have http:// prefix — stripped here with replace().
+//
+// WHY NodeSDK (not manual span creation)?
+//   getNodeAutoInstrumentations() auto-instruments express routes, http calls,
+//   and dns lookups without touching application code.  Every incoming request
+//   becomes a span; outgoing fetch() calls become child spans — building a full
+//   call tree automatically.
+//
+// WHY disable instrumentation-fs?
+//   The fs instrumentation creates a span for every filesystem operation —
+//   including every require() call during startup.  That generates thousands
+//   of noisy, low-value spans per startup.  Disabled to reduce Tempo storage.
+//
+// METRIC EXPORT via OTLPMetricExporter:
+//   Also ships OTel-native metrics (not prom-client) to Alloy via the same
+//   gRPC connection.  exportIntervalMillis: 15000 → push metrics every 15s.
+//   These are separate from the /metrics Prometheus endpoint; both coexist.
+//
+// SHUTDOWN HANDLERS (SIGTERM, SIGINT):
+//   Kubernetes sends SIGTERM to the container before stopping a pod.
+//   sdk.shutdown() flushes any in-flight spans/metrics to the collector
+//   before the process exits, preventing data loss during rolling updates.
+//
 // Must be required BEFORE any other imports — OTel patches Node.js modules at load time
 const { NodeSDK } = require('@opentelemetry/sdk-node');
 const { getNodeAutoInstrumentations } = require('@opentelemetry/auto-instrumentations-node');

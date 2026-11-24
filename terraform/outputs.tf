@@ -1,3 +1,20 @@
+# ── Terraform root outputs ────────────────────────────────────────────────────
+#
+# PURPOSE: Surfaces values that bootstrap.py and operators need after apply.
+#   Terraform stores these in the remote state file so bootstrap.py can read
+#   them with: terraform output -json | jq '.key.value'
+#
+# HOW bootstrap.py USES THESE:
+#   - kubectl_configure_command: phase 5 runs this to write ~/.kube/config
+#   - cicd_client_id/tenant_id/subscription_id: phase 3 writes these to
+#     GitHub Actions secrets (AZURE_CLIENT_ID, AZURE_TENANT_ID, etc.)
+#   - acr_login_server/acr_name: written to ACR_LOGIN_SERVER / ACR_NAME secrets
+#
+# WHY outputs instead of hardcoding in scripts?
+#   Resource names like Key Vault include a random suffix (to stay globally unique),
+#   so they can't be known until after apply.  Outputs are the contract between
+#   Terraform and the shell layer.
+#
 output "resource_group_name" {
   description = "Name of the main resource group"
   value       = azurerm_resource_group.main.name

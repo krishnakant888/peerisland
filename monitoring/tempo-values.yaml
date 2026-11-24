@@ -1,3 +1,28 @@
+# ── Tempo Helm values ─────────────────────────────────────────────────────────
+#
+# PURPOSE: Configures Grafana Tempo — the distributed tracing backend.  The app's
+#   backend (src/telemetry.js) exports traces via OTLP gRPC to Alloy, which
+#   forwards them to Tempo's OTLP receiver.  Grafana queries Tempo's API to render
+#   trace waterfalls and service maps.
+#
+# MONOLITHIC mode: all Tempo components in one pod — same rationale as Mimir/Loki.
+#
+# OTLP receivers (gRPC :4317, HTTP :4318): accepts spans from Alloy.
+#   The otel-collector-service.yaml in k8s/monitoring exposes Alloy's ports
+#   to the peerisland namespace so app pods can send traces.
+#
+# retention: 72h = 3 days.  Traces are high-cardinality (every request is a span);
+#   3 days is enough for post-incident debugging without excessive storage.
+#
+# metrics_generator: enabled — Tempo derives RED metrics (rate, errors, duration)
+#   from spans and remote-writes them to Mimir.  This powers the service map
+#   and span-level throughput dashboards in Grafana without instrumenting every
+#   service with prom-client manually.
+#
+#   service_graphs: traces → dependency map (which service calls which)
+#   span_metrics: traces → per-route latency histograms
+#   Both push to mimir.monitoring.svc.cluster.local:8080/api/v1/push
+#
 # Tempo in monolithic mode — single binary, single AKS cluster
 tempo:
   reportingEnabled: false

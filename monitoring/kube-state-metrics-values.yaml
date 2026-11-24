@@ -1,3 +1,25 @@
+# ── kube-state-metrics Helm values ────────────────────────────────────────────
+#
+# PURPOSE: Exposes Kubernetes object state as Prometheus metrics — replica counts,
+#   pod phases, HPA min/max/current, PVC conditions, etc.  These are the metrics
+#   that fill the "infrastructure" sections of Grafana dashboards.
+#
+# WHY fullnameOverride: kube-state-metrics?
+#   The Helm chart generates names like "<release>-kube-state-metrics" which vary
+#   by release name.  Alloy's metric scrape config references the Service by name
+#   (config.alloy: kubernetes.service_discovery).  Pinning the name makes config
+#   environment-agnostic — the same config.alloy works regardless of Helm release name.
+#
+# COLLECTORS: Only the resource types that dashboards actually query are enabled.
+#   Full kube-state-metrics scrapes ALL API objects — that inflates cardinality
+#   significantly in a large cluster.  Explicitly listing only what's needed keeps
+#   metric cardinality low and query performance high.
+#
+# seccompProfile removed (see comment): kube-state-metrics chart 5.27.0 defaults
+#   to seccompProfile:RuntimeDefault which requires the node OS to support it.
+#   On some AKS node image versions this causes an immediate crash (exit code 2).
+#   Dropping the seccomp profile preserves runAsNonRoot + runAsUser hardening.
+#
 fullnameOverride: kube-state-metrics
 
 replicas: 1

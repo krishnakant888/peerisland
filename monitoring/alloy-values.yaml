@@ -1,3 +1,36 @@
+# ── Alloy Helm values ─────────────────────────────────────────────────────────
+#
+# PURPOSE: Configures Grafana Alloy (replacement for Prometheus Agent, Promtail,
+#   and OTel Collector).  One Alloy DaemonSet pod runs on every node and handles:
+#   - Metric scraping (Prometheus pull model) → remote-write to Mimir
+#   - Log collection (reads /var/log/pods/**/*.log) → push to Loki
+#   - Trace reception (OTLP gRPC/HTTP) → forward to Tempo
+#
+# DaemonSet (not Deployment): Every node needs its own Alloy pod because log
+#   collection reads the node's local /var/log/pods filesystem.  A single
+#   Deployment pod could only see logs from its own node.
+#
+# platform.io/api-access: "true" label: NetworkPolicy in k8s/monitoring/
+#   network-policies.yaml only allows API server and kubelet egress to pods
+#   with this label.  Alloy needs to call the Kubernetes API for pod/service
+#   discovery and needs to reach kubelets for cAdvisor metrics scraping.
+#
+# extraPorts (4317/4318): OTLP receiver ports.  Alloy accepts trace spans
+#   from app pods via these ports (through the otel-collector-service Service
+#   in monitoring namespace which is accessible from peerisland namespace).
+#
+# configMap.create: false — the ConfigMap is managed by monitoring/alloy/
+#   kustomization.yaml and the ArgoCD monitoring-alloy-config Application.
+#   The chart is told to look for an existing "alloy-config" ConfigMap.
+#
+# extraEnv: cluster name + push URLs are injected as environment variables
+#   and referenced in config.alloy as env("MIMIR_PUSH_URL") etc.  This keeps
+#   URLs out of the alloy config file (config is environment-agnostic).
+#
+# crds.create: false — CRDs are managed by the ArgoCD application or were
+#   pre-installed.  Helm-managed CRDs get deleted on helm uninstall which
+#   would break all CRD-based resources cluster-wide.
+#
 # The Alloy configuration lives in monitoring/alloy/config.alloy and is deployed as
 # ConfigMap "alloy-config" via monitoring/alloy/kustomization.yaml (ArgoCD Application
 # monitoring-alloy-config syncs that path first).

@@ -1,3 +1,25 @@
+# ── Terraform root variables ──────────────────────────────────────────────────
+#
+# PURPOSE: Declares every input variable accepted by the root Terraform module.
+#   All values come from terraform.tfvars (gitignored — contains credentials).
+#
+# WHY NOT hardcode values?
+#   Variables let the same Terraform code deploy to different subscriptions,
+#   regions, or environments by changing only terraform.tfvars.  This is the
+#   standard Terraform multi-environment pattern.
+#
+# SENSITIVE VARIABLES: grafana_admin_password is marked sensitive=true which
+#   prevents Terraform from printing its value in plan/apply output or logs.
+#   It is also stored in Key Vault via azurerm_key_vault_secret in main.tf.
+#
+# key_vault_suffix: After an accidental `terraform destroy`, Key Vault enters
+#   a 90-day soft-delete period with its name reserved.  The suffix lets you
+#   pin the KV name to match the existing (soft-deleted) vault so Terraform
+#   can recover it rather than fail with "name already taken".
+#
+# deployer_ips: The KV network ACL allows only these IPs.  Set this to your
+#   CI/CD runner's egress IP + your workstation IP during `terraform apply`.
+#
 variable "subscription_id" {
   description = "Azure subscription ID (required by azurerm 4.x)"
   type        = string

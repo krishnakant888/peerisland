@@ -1,5 +1,35 @@
 'use strict';
 
+// ── Backend application entry point ──────────────────────────────────────────
+//
+// PURPOSE: Express HTTP server for a task management API.  This is the
+//   "application" layer of the demo — its main purpose is to generate realistic
+//   HTTP traffic so the observability stack (metrics, logs, traces) has real data.
+//
+// TELEMETRY STRATEGY — three pillars, all in this file:
+//   Metrics:  prom-client manual instrumentation (httpRequestsTotal counter,
+//             httpRequestDuration histogram).  Alloy scrapes /metrics.
+//   Traces:   OTel auto-instrumentation via telemetry.js (required first).
+//             Spans are created automatically for every express route.
+//   Logs:     stdout (console.log) — Alloy collects these from the container log.
+//
+// WHY require('./telemetry') first?
+//   OpenTelemetry works by monkey-patching Node.js modules (express, http, etc.)
+//   at require() time.  If express is required before OTel is initialised, the
+//   patches don't apply and no traces are captured.  Telemetry must be loaded
+//   before any instrumented module.
+//
+// TRACE ID IN HEADER (X-Trace-Id):
+//   The middleware reads the active OTel span's trace ID and injects it into
+//   the response header.  Frontend logs or client-side tooling can correlate
+//   a failed API call with the exact trace in Grafana Tempo.
+//
+// /metrics ENDPOINT:
+//   Exposed for Alloy to scrape (prometheus pull model).  Returns all counters
+//   and histograms registered in the prom-client Registry in Prometheus text format.
+//   This is the source of http_requests_per_second and http_request_duration_p99
+//   custom metrics that HPA uses for scaling decisions.
+//
 require('./telemetry');   // must be first — OTel patches modules at load time
 
 const { trace, context } = require('@opentelemetry/api');

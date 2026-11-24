@@ -1,3 +1,30 @@
+# ── prometheus-adapter Helm values ────────────────────────────────────────────
+#
+# PURPOSE: Bridges Mimir metrics into the Kubernetes custom metrics API so HPA
+#   can scale on application-level signals instead of raw CPU/memory.
+#
+# HOW IT WORKS:
+#   HPA spec references custom.metrics.k8s.io/v1beta1 (see backend-hpa.yaml).
+#   The HPA controller calls the custom metrics API: "what is http_requests_per_second
+#   for pod X right now?"  The adapter receives that query, translates it into
+#   a PromQL expression, sends it to Mimir, and returns the result.
+#
+# THREE CUSTOM METRICS DEFINED:
+#   1. http_requests_per_second (backend): rate(http_requests_total[2m]) per pod
+#      → primary HPA trigger (HPA scales when RPS/pod exceeds target)
+#   2. http_request_duration_p99_seconds (backend): histogram_quantile(0.99) per pod
+#      → secondary trigger — catches slow endpoints even when request count is low
+#   3. nginx_active_connections_per_pod (frontend): active handles per pod
+#      → frontend scales on connection pressure, not RPS
+#
+# WHY Mimir and not Prometheus?
+#   prometheus: url points to mimir.monitoring.svc.cluster.local:8080 with
+#   path: /prometheus.  Mimir exposes a Prometheus-compatible query API at that
+#   path, so the adapter works unchanged with Mimir as the backend.
+#
+# resource rules: standard CPU/memory pass-through so the HPA can still use
+#   resource metrics alongside custom metrics in the same HPA spec.
+#
 # Prometheus adapter translates PromQL queries into Kubernetes custom metrics
 # so HPA can scale on application-level signals instead of raw CPU/memory.
 #

@@ -1,3 +1,27 @@
+# ── Alloy ConfigMap generator ─────────────────────────────────────────────────
+#
+# PURPOSE: Packages config.alloy into a Kubernetes ConfigMap named "alloy-config"
+#   in the monitoring namespace.  The Alloy Helm chart (alloy-values.yaml) is
+#   told to use this external ConfigMap instead of creating its own.
+#
+# WHY a separate kustomization instead of inline Helm values?
+#   config.alloy is a River-language pipeline definition — it's complex enough
+#   to deserve its own file with syntax highlighting and version history.
+#   Helm values files don't support multi-line data well, and Helm would base64-
+#   encode changes in ways that make diffs hard to read.  Kustomize generates
+#   the ConfigMap directly from the file.
+#
+# WHY disableNameSuffixHash: true?
+#   Kustomize normally appends a content hash to ConfigMap names (alloy-config-abc123)
+#   so pods pick up new config on rollout.  Alloy has its own hot-reload mechanism
+#   (config-reloader sidecar); it watches the mounted file and reloads in-place
+#   without a pod restart.  Disabling the hash keeps the name stable so the
+#   Helm chart's configMap.name reference stays valid across config changes.
+#
+# HOW DEPLOYED: ArgoCD Application `monitoring-alloy-config` (argocd/applications/
+#   monitoring-alloy-config.yaml) syncs this kustomization BEFORE `monitoring-alloy`
+#   syncs the Helm chart, so the ConfigMap exists when Alloy's pod mounts it.
+#
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 namespace: monitoring

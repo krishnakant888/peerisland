@@ -1,3 +1,11 @@
+# ── Private Endpoints module inputs ──────────────────────────────────────────
+# vnet_id      → used to link the private DNS zone to the VNet so cluster DNS
+#                resolves KV hostnames to private IPs
+# pe_subnet_id → subnet where the PE NIC will be placed (private_endpoint_network_policies
+#                must be disabled on this subnet — set in networking module)
+# key_vault_id → the KV resource to connect to; determines which private DNS
+#                zone records are created (privatelink.vaultcore.azure.net)
+#
 variable "name_prefix" {
   type = string
 }

@@ -1,3 +1,23 @@
+# ── AKS module inputs ─────────────────────────────────────────────────────────
+#
+# PURPOSE: Declares all configuration for the AKS cluster, its two node pools,
+#   OIDC/workload identity, RBAC, and monitoring integration.
+#
+# TWO NODE POOLS explained:
+#   system pool (node_pool_*): runs kube-system DaemonSets + control-plane
+#     adjacent components.  Small SKU (D2s_v3) is fine — it never runs app pods.
+#     Tainted with CriticalAddonsOnly so only system workloads land here.
+#   user pool (user_node_pool_*): runs all application pods, monitoring stack
+#     (Alloy, Mimir, Loki, Tempo, Grafana), and ArgoCD.  Standard_D4s_v5
+#     (4 vCPU / 16 GB) is the minimum that fits the full LGTM observability stack.
+#
+# authorized_ip_ranges: Restricts who can reach the Kubernetes API server
+#   (kubectl, terraform, ArgoCD, CI runners).  Empty = public by default.
+#   Production should always set this to CI runner IPs + operator workstations.
+#
+# vnet_id: AKS needs "Network Contributor" on the VNet so it can provision
+#   Azure Load Balancer rules when Services of type LoadBalancer are created.
+#
 variable "name_prefix" {
   type = string
 }

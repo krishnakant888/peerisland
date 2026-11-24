@@ -2,17 +2,36 @@
 """
 bootstrap.py — PeerIsland end-to-end infrastructure bootstrap
 
-Runs every step from zero to production:
-  1   Pre-flight checks        (tools + Azure + GitHub auth)
-  2   Bootstrap TF remote state (terraform/bootstrap/)
-  3   Set GitHub Actions secrets
-  4   Provision Azure infra     (terraform apply)
-  5   Configure kubectl
-  6   Seed Key Vault secrets
-  7   Install ArgoCD + App of Apps
-  8   Wait for ArgoCD sync waves
-  9   Trigger first build       (GitHub Actions)
-  10  Watch & promote Rollouts
+PURPOSE:
+  Single-command script that takes the repo from zero to a fully running
+  production cluster.  Wraps terraform, az, kubectl, helm, argocd, and gh
+  in a single Python process with progress tracking, error recovery, and
+  idempotent phase checkpointing.
+
+DESIGN PRINCIPLES:
+  - Idempotent: safe to re-run from any phase after a failure (--from N).
+    .bootstrap-state.json tracks which phases completed so skipped phases
+    are not re-executed unless forced.
+  - Self-healing: auto-detects and fixes common failures:
+      * Stale Terraform state locks (force-unlock + retry)
+      * Resources that exist in Azure but not in state (auto-import)
+      * AKS lifecycle.ignore_changes missing fields (auto-patch + re-plan)
+      * Azure RBAC propagation lag (retries with backoff on 403)
+  - Auto-installing: missing tools (terraform, kubectl, helm, argocd, etc.)
+    are downloaded and installed on Windows or Linux without admin rights.
+  - stdlib only: no pip dependencies — works on any Python 3.9+ install.
+
+PHASE BREAKDOWN:
+  1   Pre-flight checks        — verify tools + Azure login + GitHub auth
+  2   Bootstrap TF remote state — creates the tfstate storage account
+  3   Set GitHub Actions secrets — AZURE_CLIENT_ID, ACR_NAME, AKS_CLUSTER_NAME
+  4   Provision Azure infra     — terraform apply (two-pass: AKS first, then rest)
+  5   Configure kubectl         — az aks get-credentials
+  6   Seed Key Vault secrets    — grafana admin user/password → KV
+  7   Install ArgoCD + App of Apps — helm install argocd → push app-of-apps
+  8   Wait for ArgoCD sync waves — block until all Applications are Synced/Healthy
+  9   Trigger first build       — gh workflow run build-push.yml
+  10  Watch & promote Rollouts  — monitor bluegreen; promote when preview is healthy
   11  Print all URLs and credentials
 
 Usage:

@@ -1,3 +1,30 @@
+# ── node-exporter Helm values ──────────────────────────────────────────────────
+#
+# PURPOSE: Collects OS-level metrics from every node — CPU frequency, memory
+#   pages, disk I/O, network interface counters, filesystem usage.  These are the
+#   low-level hardware metrics that kube-state-metrics cannot provide (KSM only
+#   sees Kubernetes API objects, not OS internals).
+#
+# DaemonSet (implicit in the chart): one pod per node, including system node pool.
+#
+# tolerations (NoSchedule + NoExecute for all): system node pool has the
+#   CriticalAddonsOnly taint; without matching tolerations, node-exporter would not
+#   schedule on those nodes and system-node hardware metrics would be missing.
+#
+# hostNetwork: true — node-exporter binds to the node's network namespace to get
+#   real interface stats.  Without this it only sees the pod's veth interface.
+#
+# hostPID: true — required to read per-process stats from /proc (CPU time
+#   per process, open file descriptor counts, etc.).
+#
+# hostRootFsMount + HostToContainer propagation: mounts the node root filesystem
+#   at /host so node-exporter can read /proc, /sys, and disk stats accurately.
+#   Without this, container cgroup limits distort the numbers.
+#
+# prometheus.io/scrape: "false": Alloy uses Kubernetes service discovery to find
+#   node-exporter (by label selector), not annotation-based scrape.  Setting false
+#   prevents any annotation-scraping tools from double-scraping this target.
+#
 fullnameOverride: node-exporter
 
 # Run on every node including system node pool

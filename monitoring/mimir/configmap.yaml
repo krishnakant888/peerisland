@@ -1,3 +1,28 @@
+# ── Mimir configuration ───────────────────────────────────────────────────────
+#
+# PURPOSE: Configures Grafana Mimir — the long-term metrics store that replaces
+#   standalone Prometheus.  Alloy scrapes metrics and remote-writes them here.
+#   Grafana queries Mimir (not Alloy) for all dashboards and alerts.
+#
+# SINGLE-BINARY MODE (target: all):
+#   All Mimir components (ingester, distributor, compactor, querier, etc.) run
+#   in a single process.  This is a valid production mode for small clusters.
+#   Scaling out would split these into separate microservices with their own
+#   StatefulSets and coordination via memberlist or etcd.
+#
+# multitenancy_enabled: false — only one tenant (the whole cluster).  Enabling
+#   multi-tenancy would require an X-Scope-OrgID header on every write/read
+#   request, which Alloy and Grafana would need to include.  Off = simpler.
+#
+# FILESYSTEM backend:
+#   Blocks (compressed TSDB chunks), WAL, and ruler rules all land on the
+#   StatefulSet's PVC.  For production at scale, switch backend to object storage
+#   (Azure Blob) so storage is decoupled from pod lifecycle.  At current scale,
+#   the 20Gi PVC is sufficient.
+#
+# compactor_blocks_retention_period: 720h = 30 days.  Mimir deletes TSDB blocks
+#   older than this.  Tune based on how far back dashboards need to query.
+#
 apiVersion: v1
 kind: ConfigMap
 metadata:

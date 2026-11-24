@@ -1,3 +1,32 @@
+# ── ArgoCD Ingress ────────────────────────────────────────────────────────────
+#
+# PURPOSE: Exposes the ArgoCD UI through the shared ingress-nginx controller at
+#   /argocd on the cluster's public hostname.  This is the same nginx that handles
+#   the application traffic (peerisland.centralindia.cloudapp.azure.com).
+#
+# WHY backend-protocol: HTTPS?
+#   ArgoCD server terminates its own TLS internally.  The nginx → argocd
+#   upstream connection must stay HTTPS; nginx does NOT re-encrypt by default.
+#   This annotation forces nginx to open a TLS connection to the backend pod
+#   even though nginx itself already terminated the client TLS session.
+#
+# WHY ssl-redirect: "true"?
+#   Forces HTTP → HTTPS redirect at the nginx layer.  ArgoCD's own grpc/REST
+#   clients all support TLS and must not fall back to plaintext.
+#
+# CERT LIFECYCLE:
+#   cert-manager watches for `cert-manager.io/cluster-issuer` annotations, creates
+#   a CertificateRequest to ZeroSSL (ACME), solves the HTTP-01 or DNS-01 challenge,
+#   and stores the resulting cert in secret `argocd-tls`.  nginx then picks it up.
+#
+# PATH ROUTING:
+#   /argocd → argocd-server:443   (pathType: Prefix)
+#   The app itself is at / → handled by peerisland-app ingress in namespace peerisland
+#
+# HOW DEPLOYED: ArgoCD Application `ingresses` (argocd/applications/ingresses.yaml)
+#   syncs this file from Git.  ArgoCD manages its own ingress — a chicken-and-egg
+#   solved by bootstrap.py installing ArgoCD first, then pushing the app-of-apps.
+#
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
@@ -5,8 +34,8 @@ metadata:
   namespace: argocd
   annotations:
     nginx.ingress.kubernetes.io/ssl-redirect: "true"
-    nginx.ingress.kubernetes.io/backend-protocol: "HTTPS"
-    cert-manager.io/cluster-issuer: "zerossl"
+    nginx.ingress.kubernetes.io/backend-protocol: "HTTPS"  # nginx talks TLS to argocd-server
+    cert-manager.io/cluster-issuer: "zerossl"               # triggers ZeroSSL cert provisioning
 spec:
   ingressClassName: nginx
   rules:
