@@ -1,16 +1,46 @@
-# Default deny all ingress and egress in the namespace
+# ── Kubernetes NetworkPolicy — zero-trust segmentation ────────────────────────
+#
+# Design principle: DEFAULT DENY everything, then allow only what is needed.
+# This means a misconfigured pod can't accidentally talk to other workloads.
+#
+# Traffic flow this file explicitly allows:
+#
+#   Internet → ingress-nginx (ingress-nginx namespace)
+#     → frontend:3000     (allow-frontend-ingress)
+#       → backend:3001    (allow-backend-ingress ingress rule 1)
+#
+#   Alloy (monitoring namespace) → backend:3001  (Prometheus scraping)
+#   backend:4317 → Alloy (monitoring namespace)  (OTLP trace export)
+#
+#   cert-manager ACME solver pod → port 8089     (HTTP-01 challenge response)
+#
+# Key implementation note:
+#   namespaceSelector uses kubernetes.io/metadata.name which is an AUTOMATIC label
+#   Kubernetes sets on every namespace. You do NOT need to add it manually.
+#   If this label is missing (old cluster), the monitoring namespace rules break.
+#
+
+# ── Policy 1: Default deny all ────────────────────────────────────────────────
+# Empty podSelector ({}) matches ALL pods in the namespace.
+# Empty policyTypes with no rules = deny everything.
+# This is the foundation — every pod must be explicitly allowed in a later policy.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: default-deny-all
   namespace: peerisland
 spec:
-  podSelector: {}
+  podSelector: {}       # matches all pods
   policyTypes:
     - Ingress
     - Egress
 ---
-# Frontend: accept traffic from ingress controller only
+# ── Policy 2: Frontend ingress and egress ─────────────────────────────────────
+# Who can reach the frontend?  ONLY the ingress-nginx controller.
+# What can the frontend reach?  ONLY the backend on port 3001, plus DNS.
+#
+# This prevents the frontend from being used as a pivot to reach anything else
+# in the cluster if it were compromised.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -23,28 +53,46 @@ spec:
   policyTypes:
     - Ingress
     - Egress
+
   ingress:
     - from:
+        # Only pods in the ingress-nginx namespace (the NGINX Ingress Controller)
+        # can initiate connections to the frontend on port 3000.
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: ingress-nginx
       ports:
         - port: 3000
+
   egress:
+    # Frontend → Backend: the only outbound connection the frontend needs
     - to:
         - podSelector:
             matchLabels:
               app: backend
       ports:
         - port: 3001
-    # Allow DNS
+
+    # DNS resolution (CoreDNS in kube-system namespace)
+    # Without this, all name lookups fail and the frontend can't reach backend.
     - ports:
         - port: 53
           protocol: UDP
         - port: 53
           protocol: TCP
 ---
-# Backend: accept traffic from frontend only
+# ── Policy 3: Backend ingress and egress ──────────────────────────────────────
+# Who can reach the backend?
+#   1. Frontend pods (API calls from the app)
+#   2. Alloy (Grafana's collector) in the monitoring namespace for Prometheus scraping
+#
+# What can the backend reach?
+#   1. Alloy on port 4317 — to export OTLP traces (gRPC)
+#   2. DNS
+#
+# Design decision: allow Alloy to scrape on the SAME port (3001) as production
+# traffic. This is simpler than a dedicated metrics port and avoids opening
+# an extra firewall hole. Alloy only reads /metrics — it cannot write.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -57,22 +105,30 @@ spec:
   policyTypes:
     - Ingress
     - Egress
+
   ingress:
+    # Rule 1: Frontend → Backend application traffic
     - from:
         - podSelector:
             matchLabels:
               app: frontend
       ports:
         - port: 3001
-    # Prometheus scraping from monitoring namespace
+
+    # Rule 2: Alloy → Backend Prometheus scraping
+    # Alloy runs in the monitoring namespace. It scrapes /metrics on port 3001
+    # based on pod annotations (prometheus.io/scrape: "true" in rollout.yaml).
     - from:
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: monitoring
       ports:
         - port: 3001
+
   egress:
-    # OTLP traces → Alloy in monitoring namespace
+    # Backend → Alloy OTLP trace export
+    # The backend sends distributed traces to Alloy via gRPC on port 4317.
+    # Alloy batches and forwards them to Tempo for storage.
     - to:
         - namespaceSelector:
             matchLabels:
@@ -80,13 +136,28 @@ spec:
       ports:
         - port: 4317
           protocol: TCP
+
+    # DNS
     - ports:
         - port: 53
           protocol: UDP
         - port: 53
           protocol: TCP
 ---
-# cert-manager HTTP-01 solver: accept traffic from ingress-nginx
+# ── Policy 4: cert-manager ACME HTTP-01 solver ────────────────────────────────
+# When cert-manager requests a TLS certificate from ZeroSSL (Let's Encrypt-compatible),
+# it temporarily creates a pod that answers the ACME HTTP-01 challenge.
+# ZeroSSL calls: HTTP GET /.well-known/acme-challenge/<token>
+# The request arrives: ZeroSSL → Internet → ingress-nginx → solver pod:8089
+#
+# This policy opens that specific path:
+#   - Only pods labelled as an HTTP-01 solver (set by cert-manager automatically)
+#   - Only traffic from the ingress-nginx namespace (the controller forwarding the ACME request)
+#   - Only on port 8089 (cert-manager's solver listening port)
+#   - Egress unrestricted ({}) so the solver can respond
+#
+# Without this policy, default-deny-all would block the ACME challenge and
+# certificate issuance would fail.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -95,10 +166,11 @@ metadata:
 spec:
   podSelector:
     matchLabels:
-      acme.cert-manager.io/http01-solver: "true"
+      acme.cert-manager.io/http01-solver: "true"  # label cert-manager sets on solver pods
   policyTypes:
     - Ingress
     - Egress
+
   ingress:
     - from:
         - namespaceSelector:
@@ -107,5 +179,7 @@ spec:
       ports:
         - protocol: TCP
           port: 8089
+
   egress:
+    # Unrestricted egress — solver needs to respond to ACME challenge
     - {}

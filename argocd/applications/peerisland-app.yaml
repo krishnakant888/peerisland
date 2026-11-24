@@ -1,20 +1,45 @@
-﻿apiVersion: argoproj.io/v1alpha1
+﻿# ── ArgoCD Application — peerisland workload ──────────────────────────────────
+#
+# This is a CHILD Application managed by the root app-of-apps.
+# It tells ArgoCD to sync k8s/overlays/production from Git into the
+# peerisland namespace of the cluster.
+#
+# SYNC WAVE: "3"
+#   ArgoCD processes waves in numeric order. Wave 3 means this Application
+#   deploys AFTER:
+#     Wave 1 — CRD-only apps (cert-manager, Argo Rollouts CRDs)
+#     Wave 2 — Argo Rollouts controller itself
+#   The backend/frontend Rollout resources require the Argo Rollouts CRD
+#   to exist before ArgoCD can apply them. Without the wave, ArgoCD might
+#   try to create the Rollout before its CRD exists and fail.
+#
+# GITOPS FLOW:
+#   1. CI builds Docker image, pushes to ACR
+#   2. CI runs: kustomize edit set image → updates k8s/overlays/production/kustomization.yaml
+#   3. CI pushes the kustomization.yaml change to main [skip ci]
+#   4. ArgoCD detects the Git change (poll or webhook)
+#   5. ArgoCD applies the diff — only the Rollout image tag changes
+#   6. Argo Rollouts controller starts the BlueGreen transition
+#
+apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
   name: peerisland
   namespace: argocd
   annotations:
-    argocd.argoproj.io/sync-wave: "3"   # after argo-rollouts CRDs (wave 2); Rollout resource needs them
+    # Sync after Argo Rollouts CRDs (wave 2) so Rollout resources can be applied
+    argocd.argoproj.io/sync-wave: "3"
+  # Cascade deletion: clean up all k8s resources when this Application is deleted
   finalizers:
     - resources-finalizer.argocd.argoproj.io
 spec:
   project: default
 
   source:
-    # Replace with your actual repository URL
     repoURL: https://github.com/krishnakant888/peerisland.git
     targetRevision: main
-    # ArgoCD syncs from the production overlay â€” the single source of truth
+    # ArgoCD syncs the PRODUCTION kustomize overlay.
+    # Kustomize overlay = base manifests + environment-specific patches + image tags
     path: k8s/overlays/production
 
   destination:
@@ -23,24 +48,34 @@ spec:
 
   syncPolicy:
     automated:
-      prune: true        # Delete resources removed from Git
-      selfHeal: true     # Re-sync if someone manually edits the cluster
+      # Delete k8s resources whose manifests are removed from Git
+      prune: true
+      # Revert any out-of-band changes (kubectl edit, manual patches, etc.)
+      selfHeal: true
+      # Never sync to an empty set of resources (guards against accidental blank commit)
       allowEmpty: false
     syncOptions:
+      # Create the peerisland namespace if it doesn't exist
       - CreateNamespace=true
+      # Delete foreground: waits for child resources to terminate before parent
       - PrunePropagationPolicy=foreground
+      # Apply the ignoreDifferences rules below during sync evaluation
       - RespectIgnoreDifferences=true
+      # Don't dry-run against missing CRDs (e.g. Rollout on first deploy)
       - SkipDryRunOnMissingResource=true
     retry:
-      limit: 5
+      limit: 5           # retry up to 5 times if sync fails
       backoff:
-        duration: 5s
-        factor: 2
-        maxDuration: 3m
+        duration: 5s     # wait 5s before first retry
+        factor: 2        # double the wait each attempt: 5s, 10s, 20s, 40s, 80s...
+        maxDuration: 3m  # never wait more than 3 minutes between retries
 
-  # Health assessment overrides
+  # ── Ignore drift on HPA-managed fields ────────────────────────────────────
+  # The HPA adjusts spec.replicas on the Rollout at runtime.
+  # Without this, ArgoCD would see the HPA-modified replica count as "out of sync"
+  # with the Git value (2) and keep trying to reset it — fighting the HPA.
   ignoreDifferences:
     - group: argoproj.io
       kind: Rollout
       jsonPointers:
-        - /spec/replicas   # HPA manages replicas; ignore drift
+        - /spec/replicas   # HPA manages this field; ArgoCD should ignore it

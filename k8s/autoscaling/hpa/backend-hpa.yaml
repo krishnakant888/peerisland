@@ -1,3 +1,25 @@
+# ── HorizontalPodAutoscaler for the backend ───────────────────────────────────
+#
+# WHY three metrics instead of just CPU?
+#   CPU alone is a lagging indicator. Under a sudden traffic spike, pods CPU
+#   may still look fine while request queues back up and p99 latency explodes.
+#   This HPA uses three signals in combination:
+#     1. RPS (requests per second) — primary scaling trigger
+#     2. p99 latency — catches latency degradation that RPS misses
+#     3. CPU — safety net for runaway compute
+#   Kubernetes HPA automatically picks the MAXIMUM desired replica count across
+#   all metrics, so any single metric can trigger scale-out.
+#
+# WHY no memory metric?
+#   VPA (Vertical Pod Autoscaler) owns memory requests.  If HPA also scaled
+#   on memory %, VPA adjusting memory requests would change the denominator
+#   (request value), causing the same feedback loop problem as CPU.
+#   Separating concerns: HPA handles horizontal scale, VPA handles resource sizing.
+#
+# IMPORTANT: scaleTargetRef points at a Rollout, not a Deployment.
+#   This stack uses Argo Rollouts for BlueGreen deployments.
+#   HPA must target argoproj.io/v1alpha1 Rollout or it silently does nothing.
+#
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
@@ -7,35 +29,37 @@ metadata:
     app: backend
     component: autoscaling
 spec:
+  # Target the Argo Rollout, not a plain Deployment
   scaleTargetRef:
     apiVersion: argoproj.io/v1alpha1
     kind: Rollout
     name: backend
 
-  minReplicas: 2
-  maxReplicas: 20
+  minReplicas: 2   # never below 2 — single-replica means a restart drops all traffic
+  maxReplicas: 20  # hard ceiling to prevent runaway cost during traffic spikes
 
   metrics:
-    # ── Application-level metric via Prometheus adapter ───────────────────
-    # HPA scales on REQUEST RATE — not CPU/memory — so VPA can freely adjust
-    # resource requests without triggering HPA scale events.
-    #
-    # Requires prometheus-adapter installed (see monitoring/install.sh).
-    # The adapter exposes http_requests_total as a custom metric:
+    # ── Metric 1: HTTP requests per second (RPS) ──────────────────────────────
+    # Primary scale trigger. 50 rps per pod is the target — above this, HPA
+    # adds pods. The prometheus-adapter translates http_requests_total into a
+    # custom metric the HPA API can read.
+    # To verify the adapter is working:
     #   kubectl get --raw /apis/custom.metrics.k8s.io/v1beta1 | jq .
     - type: Pods
       pods:
         metric:
-          name: http_requests_per_second   # defined in prometheus-adapter config
+          name: http_requests_per_second   # defined in prometheus-adapter ConfigMap
         target:
           type: AverageValue
           averageValue: "50"               # scale when each pod handles > 50 rps
 
-    # ── p99 latency per pod ──────────────────────────────────────────────
-    # Catches degradation that RPS misses — e.g. a slow endpoint or DB
-    # timeout dragging latency up while RPS stays below the target.
-    # HPA takes MAX(desired from RPS, desired from latency) automatically.
-    # Threshold: 500ms — normal is 1-2ms so this only fires under real stress.
+    # ── Metric 2: p99 latency ─────────────────────────────────────────────────
+    # Catches degradation that pure RPS misses.
+    # Scenario: a downstream DB is slow → each request takes 2s → RPS drops
+    # (fewer requests finish) but latency is high. HPA scaling on RPS alone
+    # would actually SCALE IN (less load?). p99 catches the real problem.
+    # Threshold 500ms: our SLO target — normal p99 is 1-2ms, so this only fires
+    # under genuine stress or a slow dependency.
     - type: Pods
       pods:
         metric:
@@ -44,10 +68,10 @@ spec:
           type: AverageValue
           averageValue: "0.5"    # scale when p99 latency > 500ms per pod
 
-    # ── CPU as a secondary safety net only ───────────────────────────────
-    # 80% of whatever VPA has set as the request. At peak, VPA may set
-    # the request to 800m — 80% of that is 640m, still 360m below the
-    # 1000m limit. Only fires during genuine runaway load.
+    # ── Metric 3: CPU utilization (safety net) ────────────────────────────────
+    # 80% of whatever VPA has set as the CPU request. At peak, VPA may set
+    # the request to 800m — 80% = 640m, still 360m below the 1000m limit.
+    # Only fires during CPU-intensive runaway load not captured by RPS/latency.
     - type: Resource
       resource:
         name: cpu
@@ -55,30 +79,37 @@ spec:
           type: Utilization
           averageUtilization: 80
 
-    # Memory is intentionally ABSENT from HPA metrics.
-    # VPA fully owns memory requests. If HPA also scaled on memory %, VPA
-    # adjusting memory requests would change the denominator and cause the
-    # same feedback loop as CPU.
+    # Memory is intentionally ABSENT — see file header comment.
 
+  # ── Scaling behaviour ─────────────────────────────────────────────────────
   behavior:
     scaleUp:
+      # 30s window: must see sustained need before adding pods.
+      # Short window = rapid response to traffic spikes (desirable for backend).
       stabilizationWindowSeconds: 30
       policies:
+        # Double capacity in 15s if the signal is very strong
         - type: Percent
           value: 100
           periodSeconds: 15
+        # Or add up to 4 pods per minute — whichever is larger (selectPolicy: Max)
         - type: Pods
           value: 4
           periodSeconds: 60
-      selectPolicy: Max
+      selectPolicy: Max   # be aggressive on scale-up; latency hurts users
 
     scaleDown:
+      # 300s (5 min) stabilisation before removing pods.
+      # Prevents flapping: a brief lull doesn't immediately shrink the fleet
+      # only for traffic to spike again 2 minutes later.
       stabilizationWindowSeconds: 300
       policies:
+        # Remove at most 10% of fleet per minute
         - type: Percent
           value: 10
           periodSeconds: 60
+        # Or at most 2 pods per minute — whichever is SMALLER (selectPolicy: Min)
         - type: Pods
           value: 2
           periodSeconds: 60
-      selectPolicy: Min
+      selectPolicy: Min   # be conservative on scale-down; avoid cold-start latency

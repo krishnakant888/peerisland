@@ -1,40 +1,76 @@
-# SLI recording rules loaded into Mimir's ruler via its HTTP API.
-# PrometheusRule CRD is not installed (no kube-prometheus-stack).
-# This Job runs as an ArgoCD PostSync hook — idempotent, safe to re-run.
+# ── Mimir recording rules + loader Job ────────────────────────────────────────
+#
+# WHY recording rules instead of inline alert expressions?
+#   The SLO burn-rate alerts need error ratios over multiple time windows
+#   (5m, 30m, 1h, 6h, 30d). Computing these inline in every alert is expensive —
+#   Mimir evaluates the expression on every scrape cycle.
+#   Recording rules pre-compute these values into new time-series, so the
+#   alert expressions are cheap instant-vector lookups.
+#
+# WHY push via HTTP instead of using PrometheusRule CRD?
+#   PrometheusRule is a CRD from kube-prometheus-stack, which we don't have
+#   installed. Mimir has its own ruler API that accepts rules via HTTP POST.
+#   This Job posts the ConfigMap contents to Mimir's ruler endpoint on every
+#   ArgoCD sync (PostSync hook). It's idempotent — safe to run multiple times.
+#
+# SLI definition (Good Request):
+#   A request is "good" if:
+#     - HTTP status is NOT 5xx (not a server error)
+#     - AND the request completes within 500ms (le="0.5" bucket)
+#   Error ratio = 1 - (good_requests / total_requests)
+#   SLO target: 99.9% — meaning error_ratio must stay below 0.001 (0.1%)
+#
+
 ---
+# ── ConfigMap: rule files consumed by the loader Job ─────────────────────────
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: mimir-ruler-rules
   namespace: monitoring
 data:
-  # Composite SLI: good = NOT 5xx AND finishes within 500ms.
-  # Evaluated every 30s — cheap instant-vector queries used by SLO alerts.
+  # ── Short-window SLI rules (evaluated every 30s) ──────────────────────────
+  # These are the building blocks used by the SLO burn-rate alerts in
+  # grafana-alert-rules.yaml. Fast windows give rapid detection.
   peerisland-sli.yaml: |
     name: peerisland-sli
     interval: 30s
     rules:
+      # Count of "good" requests in the last 5 minutes:
+      #   - status_code!~"5.." excludes 5xx server errors
+      #   - le="0.5" counts only requests that completed in ≤ 500ms
       - record: sli:peerisland:requests_good:rate5m
         expr: >-
           sum(rate(http_request_duration_seconds_bucket{namespace="peerisland",le="0.5",status_code!~"5.."}[5m]))
+
+      # Total request rate (all requests, good and bad)
       - record: sli:peerisland:requests_total:rate5m
         expr: >-
           sum(rate(http_request_duration_seconds_count{namespace="peerisland"}[5m]))
+
+      # Error ratio over 5m — used by the fast burn-rate alert (1h + 5m windows)
+      # Formula: 1 - (good / total) = fraction of requests that were NOT good
       - record: sli:peerisland:error_ratio:rate5m
         expr: >-
           1 - (sli:peerisland:requests_good:rate5m / sli:peerisland:requests_total:rate5m)
+
+      # Error ratio over 30m — used by medium burn-rate alert (6h + 30m windows)
       - record: sli:peerisland:error_ratio:rate30m
         expr: >-
           1 - (
             sum(rate(http_request_duration_seconds_bucket{namespace="peerisland",le="0.5",status_code!~"5.."}[30m]))
             / sum(rate(http_request_duration_seconds_count{namespace="peerisland"}[30m]))
           )
+
+      # Error ratio over 1h — used by the slow component of high burn-rate alert
       - record: sli:peerisland:error_ratio:rate1h
         expr: >-
           1 - (
             sum(rate(http_request_duration_seconds_bucket{namespace="peerisland",le="0.5",status_code!~"5.."}[1h]))
             / sum(rate(http_request_duration_seconds_count{namespace="peerisland"}[1h]))
           )
+
+      # Error ratio over 6h — used by the slow component of medium burn-rate alert
       - record: sli:peerisland:error_ratio:rate6h
         expr: >-
           1 - (
@@ -42,38 +78,59 @@ data:
             / sum(rate(http_request_duration_seconds_count{namespace="peerisland"}[6h]))
           )
 
-  # 30-day composite error ratio and error budget — evaluated every 5m.
+  # ── 30-day SLO rules (evaluated every 5m) ────────────────────────────────
+  # Long-window rules are expensive so evaluated less frequently (5m vs 30s).
+  # The 30d window gives the "current month" error budget snapshot.
   peerisland-slo-30d.yaml: |
     name: peerisland-slo-30d
     interval: 5m
     rules:
+      # 30-day error ratio — uses increase() not rate() for a true cumulative count
       - record: sli:peerisland:error_ratio:rate30d
         expr: >-
           1 - (
             sum(increase(http_request_duration_seconds_bucket{namespace="peerisland",le="0.5",status_code!~"5.."}[30d]))
             / sum(increase(http_request_duration_seconds_count{namespace="peerisland"}[30d]))
           )
+
+      # Error budget remaining — 1.0 = full budget, 0.0 = budget exhausted
+      # Formula: 1 - (actual_error_ratio / allowed_error_ratio)
+      #   allowed = 0.001 (our 99.9% SLO → 0.1% allowed errors)
+      # This feeds the error budget burn dashboard in Grafana.
       - record: slo:peerisland:error_budget_remaining
         expr: 1 - (sli:peerisland:error_ratio:rate30d / 0.001)
+
 ---
-# PostSync hook: pushes recording rules into Mimir's ruler on every ArgoCD sync.
-# BeforeHookCreation deletes the previous job so the new one can run cleanly.
+# ── PostSync Job: load rules into Mimir's ruler API ───────────────────────────
+#
+# ArgoCD lifecycle hooks:
+#   PostSync = runs AFTER ArgoCD has applied all manifests in the sync.
+#   BeforeHookCreation = delete the previous Job before creating this one,
+#   so a re-sync doesn't fail because a completed Job already exists.
+#
+# The Job is a one-shot curl script that POSTs each rule file to:
+#   http://mimir.monitoring.svc.cluster.local:8080/prometheus/config/v1/rules/peerisland
+# Mimir's ruler stores the rules in its backend and starts evaluating them.
+#
 apiVersion: batch/v1
 kind: Job
 metadata:
   name: mimir-load-recording-rules
   namespace: monitoring
   annotations:
+    # ArgoCD runs this Job after every successful sync
     argocd.argoproj.io/hook: PostSync
+    # Deletes the old Job so this one can be created cleanly on next sync
     argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
 spec:
+  # Auto-delete the Job pod 5 minutes after completion — keeps the namespace tidy
   ttlSecondsAfterFinished: 300
   template:
     spec:
-      restartPolicy: OnFailure
+      restartPolicy: OnFailure  # retry if curl fails (e.g. Mimir not yet ready)
       securityContext:
         runAsNonRoot: true
-        runAsUser: 65534
+        runAsUser: 65534  # nobody user — no privileges needed for HTTP calls
       containers:
         - name: load-rules
           image: alpine/curl:latest
@@ -90,7 +147,7 @@ spec:
               curl -sf "${BASE}" | head -c 500
           volumeMounts:
             - name: rules
-              mountPath: /rules
+              mountPath: /rules   # ConfigMap files mounted here
           resources:
             requests: {cpu: 50m, memory: 32Mi}
             limits: {cpu: 100m, memory: 64Mi}
@@ -100,6 +157,7 @@ spec:
             capabilities:
               drop: [ALL]
       volumes:
+        # Mount the ConfigMap above as files at /rules/peerisland-sli.yaml etc.
         - name: rules
           configMap:
             name: mimir-ruler-rules

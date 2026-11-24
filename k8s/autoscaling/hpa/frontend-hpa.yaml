@@ -1,3 +1,16 @@
+# ── HorizontalPodAutoscaler for the frontend ──────────────────────────────────
+#
+# WHY different metrics than the backend?
+#   The frontend is a static file server (nginx). It doesn't process business logic
+#   or hit databases, so request duration / p99 latency is not meaningful here.
+#   The bottleneck for nginx is concurrent connections — when too many clients are
+#   open simultaneously, response times creep up.  nginx_active_connections is
+#   therefore the primary signal.
+#
+# WHY lower maxReplicas (10) than backend (20)?
+#   nginx scales much more efficiently than a Node.js API — a single nginx pod can
+#   comfortably handle hundreds of concurrent connections. We don't need as many pods.
+#
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
@@ -7,18 +20,21 @@ metadata:
     app: frontend
     component: autoscaling
 spec:
+  # Targets the Argo Rollout — same requirement as backend HPA
   scaleTargetRef:
     apiVersion: argoproj.io/v1alpha1
     kind: Rollout
     name: frontend
 
-  minReplicas: 2
+  minReplicas: 2   # always HA — single replica = SPOF
   maxReplicas: 10
 
   metrics:
-    # Frontend is a static file server — connections-per-pod is a better
-    # signal than RPS because a single user holds a connection open.
-    # Falls back to CPU (high threshold) if the custom metric is unavailable.
+    # ── Metric 1: nginx active connections per pod ────────────────────────────
+    # Primary scale trigger. 200 concurrent connections per pod is comfortable
+    # for nginx. Above this, response times start to degrade.
+    # This custom metric comes from the nginx prometheus exporter (nginx-prometheus-exporter
+    # sidecar) scraped by Alloy and exposed via prometheus-adapter.
     - type: Pods
       pods:
         metric:
@@ -27,7 +43,9 @@ spec:
           type: AverageValue
           averageValue: "200"
 
-    # CPU safety net at 80% — same reasoning as backend.
+    # ── Metric 2: CPU (safety net) ────────────────────────────────────────────
+    # Same reasoning as backend: 80% of VPA-managed request = very high utilisation.
+    # Only fires for genuine runaway load (e.g. DDoS with many small requests).
     - type: Resource
       resource:
         name: cpu
@@ -37,19 +55,24 @@ spec:
 
     # Memory absent — VPA owns it.
 
+  # ── Scaling behaviour ─────────────────────────────────────────────────────
   behavior:
     scaleUp:
+      # 60s window (more conservative than backend's 30s).
+      # Static file serving has very little warm-up cost — a new pod is ready
+      # almost instantly — but we still want to avoid over-reaction.
       stabilizationWindowSeconds: 60
       policies:
         - type: Pods
           value: 2
-          periodSeconds: 60
+          periodSeconds: 60   # add at most 2 pods per minute
       selectPolicy: Max
 
     scaleDown:
+      # 5-minute window before removing pods — same caution as backend.
       stabilizationWindowSeconds: 300
       policies:
         - type: Pods
           value: 1
-          periodSeconds: 120
+          periodSeconds: 120   # remove at most 1 pod every 2 minutes
       selectPolicy: Min

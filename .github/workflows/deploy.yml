@@ -1,7 +1,28 @@
+# ── Manual Escape Hatch: Rollback or Force ArgoCD Sync ───────────────────────
+#
+# PURPOSE:
+#   This workflow handles TWO emergency scenarios that the normal GitOps flow
+#   can't handle automatically:
+#
+#   1. ROLLBACK: "The latest deploy broke production — revert to tag abc12345"
+#      Input: image_tag = "abc12345"
+#      Action: Updates the kustomize overlay to that tag and pushes.
+#              ArgoCD detects the Git change and deploys the old version.
+#              The same GitOps path as a normal deploy, just going backwards.
+#
+#   2. FORCE SYNC: "ArgoCD is stuck / cache is stale — force a hard refresh"
+#      Input: force_sync = true
+#      Action: Gets AKS credentials, port-forwards ArgoCD server locally,
+#              and runs: argocd app sync peerisland --force --hard-refresh
+#              This bypasses ArgoCD's poll interval and clears any sync cache.
+#
+# WHY workflow_dispatch only?
+#   This is a manual gate. It should NEVER trigger automatically — only a human
+#   with explicit intent should run a rollback or force sync. The 'environment:
+#   production' gate also adds an approval step if configured in GitHub settings.
+#
 name: Manual Hard Sync (ArgoCD)
 
-# This workflow is an escape hatch for forcing an ArgoCD sync
-# or for rollback. Normal deployments flow through build-push.yml → Git → ArgoCD.
 on:
   workflow_dispatch:
     inputs:
@@ -18,9 +39,10 @@ jobs:
     name: Rollback / Hard Sync
     runs-on: ubuntu-latest
     permissions:
-      contents: write
-      id-token: write
+      contents: write    # write needed to push rollback commit
+      id-token: write    # OIDC for Azure login (force_sync path)
 
+    # GitHub environment gate — can require manual approval before this job runs
     environment:
       name: production
 
@@ -31,9 +53,13 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install kustomize
+        # Only needed for the rollback path (image_tag provided)
         if: ${{ inputs.image_tag != '' }}
         uses: imranismail/setup-kustomize@v2
 
+      # ── ROLLBACK PATH ─────────────────────────────────────────────────────
+      # If image_tag is provided, update the production overlay to that tag.
+      # This is identical to the forward-deploy flow but with an old SHA.
       - name: Roll back image tag in overlay
         if: ${{ inputs.image_tag != '' }}
         working-directory: k8s/overlays/production
@@ -50,9 +76,14 @@ jobs:
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add k8s/overlays/production/kustomization.yaml
+          # [skip ci] prevents triggering the build-push workflow on this commit
           git commit -m "chore(rollback): revert images to ${TAG} [skip ci]"
           git push
+          # ArgoCD detects this push and deploys the rolled-back tag
 
+      # ── FORCE SYNC PATH ───────────────────────────────────────────────────
+      # If force_sync = true, talk directly to ArgoCD to trigger an immediate sync.
+      # Use case: ArgoCD is stuck, webhook missed, or we need a hard refresh.
       - name: Azure Login
         if: ${{ inputs.force_sync }}
         uses: azure/login@v2
@@ -64,21 +95,29 @@ jobs:
       - name: Get AKS credentials & hard-refresh ArgoCD
         if: ${{ inputs.force_sync }}
         run: |
+          # Pull kubeconfig from AKS so kubectl can talk to the cluster
           az aks get-credentials \
             --resource-group "${{ secrets.AKS_RESOURCE_GROUP }}" \
             --name "${{ secrets.AKS_CLUSTER_NAME }}" \
             --overwrite-existing
 
-          # Port-forward ArgoCD server and trigger a hard refresh
+          # Port-forward the ArgoCD server to localhost:8080 in the background.
+          # ArgoCD isn't exposed externally — this is the only way to reach its API
+          # from a GitHub Actions runner without a VPN.
           kubectl port-forward svc/argocd-server 8080:443 -n argocd &
-          sleep 5
+          sleep 5  # wait for port-forward to be ready
 
-          # Login with admin token from secret
+          # Read the initial admin password from the auto-created secret
           ARGOCD_PWD=$(kubectl get secret argocd-initial-admin-secret \
             -n argocd -o jsonpath='{.data.password}' | base64 -d)
 
+          # Login to ArgoCD CLI — --insecure because localhost TLS cert is self-signed
           argocd login localhost:8080 \
             --username admin --password "$ARGOCD_PWD" --insecure
 
+          # Hard refresh: bypasses the manifest cache and re-fetches from Git
+          # --force: overwrites any manual changes to the cluster (like a manual apply)
           argocd app sync peerisland --force --hard-refresh
+
+          # Wait up to 5 minutes for the application to reach Healthy status
           argocd app wait peerisland --health --timeout 300

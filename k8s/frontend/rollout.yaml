@@ -1,3 +1,16 @@
+# ── Argo Rollouts BlueGreen deployment for the frontend ───────────────────────
+#
+# Same BlueGreen strategy as the backend — see k8s/backend/rollout.yaml for
+# the full explanation of WHY we use Rollout instead of Deployment.
+#
+# Key difference from backend:
+#   - Frontend is a static file server (nginx-based); it has NO tracing/OTLP env vars
+#     because it doesn't make outbound requests that need distributed tracing.
+#   - Resource budget is lighter (50m/64Mi requests) — nginx is CPU/memory-cheap.
+#   - Port is 3000 (backend is 3001).
+#   - No Prometheus annotations — frontend metrics are scraped via the named port
+#     on the Service object, not pod annotations.
+#
 apiVersion: argoproj.io/v1alpha1
 kind: Rollout
 metadata:
@@ -12,11 +25,16 @@ spec:
     matchLabels:
       app: frontend
 
+  # ── BlueGreen strategy — identical pattern to backend ─────────────────────
   strategy:
     blueGreen:
+      # Production traffic always goes to activeService (blue / stable version)
       activeService: frontend-active
+      # New version (green / candidate) is reachable via previewService for QA
       previewService: frontend-preview
+      # Manual gate: a human promotes after validating the preview endpoint
       autoPromotionEnabled: false
+      # 30s drain window after promotion so in-flight connections finish
       scaleDownDelaySeconds: 30
       previewReplicaCount: 2
       abortScaleDownDelaySeconds: 30
@@ -27,24 +45,35 @@ spec:
         app: frontend
     spec:
       serviceAccountName: peerisland-sa
+
+      # ── Pod security context ───────────────────────────────────────────────
       securityContext:
         runAsNonRoot: true
-        runAsUser: 1001
+        runAsUser: 1001       # nginx runs as an unprivileged user in our image
         fsGroup: 1001
         seccompProfile:
           type: RuntimeDefault
+
       containers:
         - name: frontend
           image: PLACEHOLDER_ACR/frontend:latest
           imagePullPolicy: Always
+
           ports:
             - containerPort: 3000
               name: http
+
           env:
             - name: PORT
               value: "3000"
             - name: NODE_ENV
               value: "production"
+            # No OTEL env vars here — frontend is a static file server.
+            # Traces (page loads, API calls) are captured on the backend side.
+
+          # ── Resource budget (lighter than backend) ─────────────────────────
+          # nginx is very efficient; 50m CPU and 64Mi memory cover idle + moderate load.
+          # VPA adjusts requests upward if nginx approaches its limits.
           resources:
             requests:
               cpu: "50m"
@@ -52,6 +81,8 @@ spec:
             limits:
               cpu: "500m"
               memory: "256Mi"
+
+          # ── Health probes ──────────────────────────────────────────────────
           livenessProbe:
             httpGet:
               path: /health
@@ -66,17 +97,25 @@ spec:
             initialDelaySeconds: 5
             periodSeconds: 10
             failureThreshold: 3
+
+          # ── Container security hardening ───────────────────────────────────
           securityContext:
             allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: true
+            readOnlyRootFilesystem: true  # nginx writes to /tmp and /var/cache/nginx
             capabilities:
               drop: ["ALL"]
+
           volumeMounts:
             - name: tmp
               mountPath: /tmp
+
       volumes:
         - name: tmp
-          emptyDir: {}
+          emptyDir: {}  # writable scratch; nginx needs this with readOnlyRootFilesystem
+
+      # ── Topology spread — same anti-affinity intent as backend ────────────
+      # Guarantees the two frontend replicas are on different nodes so a node
+      # failure doesn't drop all frontend capacity simultaneously.
       topologySpreadConstraints:
         - maxSkew: 1
           topologyKey: kubernetes.io/hostname

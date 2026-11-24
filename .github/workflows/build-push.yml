@@ -1,8 +1,33 @@
+# ── CI/CD Pipeline: Build, Push & GitOps Update ───────────────────────────────
+#
+# PURPOSE:
+#   Build Docker images for frontend and backend, push them to ACR,
+#   then update the kustomize overlay in Git. ArgoCD picks up the Git change
+#   and deploys automatically. No kubectl in this pipeline.
+#
+# GITOPS PRINCIPLE:
+#   Git is the single source of truth for what is running in production.
+#   This pipeline NEVER talks directly to Kubernetes. Instead it:
+#     1. Builds and pushes the image
+#     2. Updates k8s/overlays/production/kustomization.yaml with the new tag
+#     3. Commits [skip ci] so this pipeline doesn't re-trigger
+#     4. Pushes to main → ArgoCD detects → deploys
+#
+# OIDC AUTHENTICATION:
+#   No stored client secrets. GitHub Actions exchanges a short-lived OIDC token
+#   for an Azure access token via the federated identity credential in Terraform.
+#   The credential is scoped to repo:org/peerisland:ref:refs/heads/main.
+#
+# BUILD MATRIX:
+#   Both frontend and backend build in PARALLEL (strategy.matrix).
+#   This halves the build time compared to sequential builds.
+#
 name: Build, Push & Update Image Tag
 
 on:
   push:
     branches: [main]
+    # Only run when application code actually changes — not on docs or infra commits
     paths:
       - "app/**"
   workflow_dispatch:
@@ -20,12 +45,14 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      id-token: write
+      id-token: write  # REQUIRED for OIDC — allows GitHub to generate the JWT token
 
+    # Build frontend and backend in parallel using a matrix
     strategy:
       matrix:
         service: [frontend, backend]
 
+    # Expose the computed image tag to the downstream update-image-tag job
     outputs:
       image_tag: ${{ steps.tag.outputs.tag }}
 
@@ -36,10 +63,15 @@ jobs:
       - name: Set image tag
         id: tag
         run: |
+          # Use the first 8 characters of the git SHA as the image tag.
+          # Short SHA = human-readable, unique enough, ties image directly to commit.
+          # Manual trigger can override with a custom tag for hotfixes.
           TAG="${{ github.event.inputs.tag || github.sha }}"
           echo "tag=${TAG:0:8}" >> "$GITHUB_OUTPUT"
 
       - name: Azure Login (OIDC — no stored secrets)
+        # Exchanges the GitHub OIDC JWT for an Azure access token.
+        # The federated identity credential in Terraform whitelists this exact workflow.
         uses: azure/login@v2
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
@@ -47,39 +79,48 @@ jobs:
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
       - name: Log in to ACR
+        # Uses the Azure access token from the OIDC login above — no ACR password needed
         run: az acr login --name "${{ secrets.ACR_NAME }}"
 
       - name: Set up Docker Buildx
+        # Buildx enables layer caching (cache-from/cache-to below)
         uses: docker/setup-buildx-action@v3
 
       - name: Build and push
         uses: docker/build-push-action@v5
         with:
-          context: app/${{ matrix.service }}
+          context: app/${{ matrix.service }}   # Dockerfile lives in app/frontend/ or app/backend/
           push: true
           tags: |
             ${{ env.ACR_LOGIN_SERVER }}/${{ matrix.service }}:${{ steps.tag.outputs.tag }}
             ${{ env.ACR_LOGIN_SERVER }}/${{ matrix.service }}:latest
+          # GitHub Actions cache: reuse layers from previous runs in the same repo
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          # provenance: false — avoids creating a separate attestation manifest
+          # that confuses some ACR image listing tools
           provenance: false
 
       - name: Scan image (Trivy — block on CRITICAL)
+        # Security gate: if the image has ANY CRITICAL CVE, the build fails here.
+        # The image is already pushed (so it exists in ACR) but the GitOps update
+        # job below is blocked — ArgoCD never deploys it.
         uses: aquasecurity/trivy-action@master
         with:
           image-ref: "${{ env.ACR_LOGIN_SERVER }}/${{ matrix.service }}:${{ steps.tag.outputs.tag }}"
           format: "table"
-          exit-code: "1"
+          exit-code: "1"      # non-zero exit = fail the job
           severity: "CRITICAL"
 
-  # GitOps step: update the image tag in the overlay and push to Git.
-  # ArgoCD detects the commit and syncs — no kubectl in this pipeline.
+  # ── GitOps update: commit the new image tag to Git ──────────────────────────
+  # Runs AFTER both matrix builds succeed. Updates the production overlay
+  # and pushes to main. ArgoCD detects the push and deploys.
   update-image-tag:
     name: Update image tag in overlay
-    needs: build
+    needs: build           # wait for all matrix builds to complete successfully
     runs-on: ubuntu-latest
     permissions:
-      contents: write  # Needs to push the tag commit
+      contents: write      # needs write permission to push to main
 
     steps:
       - name: Checkout
@@ -96,6 +137,9 @@ jobs:
           TAG="${{ needs.build.outputs.image_tag }}"
           ACR="${{ env.ACR_LOGIN_SERVER }}"
 
+          # kustomize edit set image: finds the PLACEHOLDER_ACR/backend reference
+          # in kustomization.yaml and replaces it with the real ACR path + new tag.
+          # This is the ONLY place that links a Git commit to an image version.
           kustomize edit set image \
             "PLACEHOLDER_ACR/backend=${ACR}/backend:${TAG}"
 
@@ -111,9 +155,11 @@ jobs:
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add k8s/overlays/production/kustomization.yaml
+          # [skip ci] prevents this commit from re-triggering this workflow
           git commit -m "chore(deploy): bump images to ${TAG} [skip ci]"
           git push
 
-      # ArgoCD is watching k8s/overlays/production on main.
-      # The push above triggers a webhook (if configured) or ArgoCD's poll interval,
-      # and it syncs the new image tags to the cluster automatically.
+      # At this point: Git is updated → ArgoCD polls/webhook detects the change
+      # → ArgoCD syncs → Argo Rollouts starts a BlueGreen transition
+      # → New green pods come up → preview endpoint is live for validation
+      # → Engineer promotes: kubectl argo rollouts promote backend/frontend -n peerisland

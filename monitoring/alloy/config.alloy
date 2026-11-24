@@ -1,32 +1,53 @@
-// One Alloy configuration for the AKS cluster.
-// Endpoints and the cluster name come from environment variables set in alloy-values.yaml:
-//   CLUSTER          — cluster label added to every series and log line
+// ── Grafana Alloy configuration — cluster-wide observability pipeline ─────────
+//
+// WHAT IS ALLOY?
+//   Grafana Alloy is the successor to Grafana Agent. It is a single DaemonSet
+//   that collects ALL three observability signals:
+//     - Metrics → scraped from pods/nodes and pushed to Mimir (Prometheus-compatible)
+//     - Logs    → collected from pod stdout/stderr and pushed to Loki
+//     - Traces  → received via OTLP from the backend app and forwarded to Tempo
+//
+// WHY ONE AGENT INSTEAD OF SEPARATE TOOLS?
+//   This simplifies the monitoring stack: one DaemonSet per node handles everything.
+//   The alternative (separate Prometheus, Fluentbit, OpenTelemetry Collector) requires
+//   three DaemonSets, three sets of RBAC, and three sets of configuration to maintain.
+//
+// ENVIRONMENT VARIABLES (injected by alloy-values.yaml):
+//   CLUSTER          — cluster label added to every metric series and log line
 //   MIMIR_PUSH_URL   — http://mimir.monitoring.svc.cluster.local:8080/api/v1/push
 //   LOKI_PUSH_URL    — http://monitoring-loki.monitoring.svc.cluster.local:3100/loki/api/v1/push
 //   TEMPO_OTLP       — monitoring-tempo.monitoring.svc.cluster.local:4317
 //
-// Every series and log line carries a cluster label — if the cluster is later split or joined
-// to a central Mimir/Loki, the label already exists.
+// DATA FLOW:
+//   Pods → Alloy discovers via Kubernetes API → scrapes /metrics → remote_write → Mimir
+//   Pods → Alloy reads stdout/stderr → processes (level, traceId) → push → Loki
+//   Backend app → OTLP gRPC:4317 → Alloy → batch → OTLP → Tempo
+//
 
 logging {
   level  = "info"
   format = "json"
 }
 
-// ── Metrics ──────────────────────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════════
+// METRICS PIPELINE
+// ═══════════════════════════════════════════════════════════════════════════════
 
+// Destination: Mimir remote-write endpoint
 prometheus.remote_write "mimir" {
   endpoint {
     url = sys.env("MIMIR_PUSH_URL")
   }
+  // cluster label attached to every series — essential for multi-cluster Mimir setups
   external_labels = {cluster = sys.env("CLUSTER")}
 }
 
+// Discover all pods in the cluster via the Kubernetes API
 discovery.kubernetes "pods" {
   role = "pod"
 }
 
-// Drop pods that are no longer running — no metrics, no logs
+// Drop Succeeded/Failed pods — they produce no metrics and would create stale series
 discovery.relabel "live_pods" {
   targets = discovery.kubernetes.pods.targets
   rule {
@@ -36,26 +57,35 @@ discovery.relabel "live_pods" {
   }
 }
 
-// ── Annotation-based scrape (prometheus.io/scrape=true) ──────────────────────
-
+// ── Scrape path 1: annotation-based discovery ──────────────────────────────────
+// Pods opt in by adding these annotations to their pod template:
+//   prometheus.io/scrape: "true"
+//   prometheus.io/port: "3001"
+//   prometheus.io/path: "/metrics"
+// The backend Rollout has these annotations. This avoids needing a ServiceMonitor CRD.
 discovery.relabel "annotated_pods" {
   targets = discovery.relabel.live_pods.output
+
+  // Keep only pods that explicitly opted in to scraping
   rule {
     source_labels = ["__meta_kubernetes_pod_annotation_prometheus_io_scrape"]
     regex         = "true"
     action        = "keep"
   }
+  // Use the custom path annotation if set (default is /metrics)
   rule {
     source_labels = ["__meta_kubernetes_pod_annotation_prometheus_io_path"]
     regex         = "(.+)"
     target_label  = "__metrics_path__"
   }
+  // Override the scrape port with the annotation value
   rule {
     source_labels = ["__address__", "__meta_kubernetes_pod_annotation_prometheus_io_port"]
     regex         = "([^:]+)(?::\\d+)?;(\\d+)"
     replacement   = "$1:$2"
     target_label  = "__address__"
   }
+  // Add standard labels — these appear in Grafana queries and alert expressions
   rule {
     source_labels = ["__meta_kubernetes_namespace"]
     target_label  = "namespace"
@@ -68,6 +98,7 @@ discovery.relabel "annotated_pods" {
     source_labels = ["__meta_kubernetes_pod_node_name"]
     target_label  = "node"
   }
+  // Set "service" label from various common label patterns (k8s_app, app, app.kubernetes.io/name)
   rule {
     source_labels = ["__meta_kubernetes_pod_controller_name"]
     regex         = "(.+)"
@@ -97,23 +128,26 @@ discovery.relabel "annotated_pods" {
 
 prometheus.scrape "annotated_pods" {
   scrape_interval = "30s"
-  honor_labels    = true
+  honor_labels    = true   // respect any labels the target exports (e.g. job=)
   targets         = discovery.relabel.annotated_pods.output
   forward_to      = [prometheus.remote_write.mimir.receiver]
 }
 
-// ── Named metrics-port scrape (no annotation needed) ─────────────────────────
-// Alloy, ArgoCD, CoreDNS, and any chart that exposes a container port named "metrics"
-// are picked up automatically.
-
+// ── Scrape path 2: named port discovery ────────────────────────────────────────
+// Alloy, ArgoCD, CoreDNS, cert-manager, and any Helm chart that exposes a container
+// port named "metrics" or "http-metrics" or "prom-metrics" are auto-discovered here.
+// No annotation needed — the port NAME is the signal.
+// This path skips pods already in the annotated_pods set to avoid double-scraping.
 discovery.relabel "named_metrics_port" {
   targets = discovery.relabel.live_pods.output
+
+  // Keep only pods with a container port named "metrics" (or similar)
   rule {
     source_labels = ["__meta_kubernetes_pod_container_port_name"]
     regex         = "(http-)?metrics|prom-metrics"
     action        = "keep"
   }
-  // skip pods that already opted in with the annotation — avoid double-scraping
+  // Drop pods that already opted in with annotation — prevents double scrape
   rule {
     source_labels = ["__meta_kubernetes_pod_annotation_prometheus_io_scrape"]
     regex         = "true|false"
@@ -165,16 +199,19 @@ prometheus.scrape "named_metrics_port" {
   forward_to      = [prometheus.remote_write.mimir.receiver]
 }
 
-// ── Alloy self-metrics ────────────────────────────────────────────────────────
-
+// ── Alloy self-metrics ─────────────────────────────────────────────────────────
+// Alloy exposes its own metrics on port 12345 (scrape lag, queue depth, etc.)
+// Essential for detecting if the observability pipeline itself is degraded.
 prometheus.scrape "alloy" {
   scrape_interval = "30s"
   targets         = [{"__address__" = "localhost:12345", "job" = "alloy", "namespace" = "monitoring", "service" = "alloy"}]
   forward_to      = [prometheus.remote_write.mimir.receiver]
 }
 
-// ── Node metrics: cAdvisor + kubelet ─────────────────────────────────────────
-
+// ── Node metrics: cAdvisor ─────────────────────────────────────────────────────
+// cAdvisor runs inside the kubelet and exposes container CPU/memory/network metrics.
+// These power the "Container CPU usage" and "Container memory usage" Grafana panels.
+// Alloy scrapes the kubelet HTTPS endpoint using its SA token for auth.
 discovery.kubernetes "nodes" {
   role = "node"
 }
@@ -183,7 +220,7 @@ discovery.relabel "cadvisor" {
   targets = discovery.kubernetes.nodes.targets
   rule {
     target_label = "__metrics_path__"
-    replacement  = "/metrics/cadvisor"
+    replacement  = "/metrics/cadvisor"   // cAdvisor sub-path on the kubelet endpoint
   }
   rule {
     source_labels = ["__meta_kubernetes_node_name"]
@@ -197,12 +234,15 @@ prometheus.scrape "cadvisor" {
   scheme            = "https"
   bearer_token_file = "/var/run/secrets/kubernetes.io/serviceaccount/token"
   tls_config {
-    insecure_skip_verify = true
+    insecure_skip_verify = true   // kubelet uses a self-signed cert
   }
   job_name   = "cadvisor"
   forward_to = [prometheus.remote_write.mimir.receiver]
 }
 
+// ── Node metrics: kubelet ──────────────────────────────────────────────────────
+// kubelet exposes metrics about pod lifecycle, PVC stats, and running containers.
+// We filter to only the series used by our dashboards to reduce storage in Mimir.
 discovery.relabel "kubelet" {
   targets = discovery.kubernetes.nodes.targets
   rule {
@@ -227,7 +267,8 @@ prometheus.scrape "kubelet" {
   forward_to = [prometheus.relabel.kubelet_keep.receiver]
 }
 
-// Keep only the kubelet series the dashboards actually use
+// Drop 95%+ of kubelet series — keep only what our dashboards query.
+// This significantly reduces Mimir storage and query cost.
 prometheus.relabel "kubelet_keep" {
   rule {
     source_labels = ["__name__"]
@@ -237,13 +278,14 @@ prometheus.relabel "kubelet_keep" {
   forward_to = [prometheus.remote_write.mimir.receiver]
 }
 
-// ── Node Exporter (host-level CPU/memory/disk/network) ───────────────────────
-// node-exporter DaemonSet runs with hostNetwork; scrape via node internal IP:9100
-
+// ── Node Exporter (host-level CPU/memory/disk/network) ────────────────────────
+// node-exporter DaemonSet runs with hostNetwork and exposes OS-level metrics on port 9100.
+// Essential for "Node memory available", "Disk I/O", "Network bytes/s" dashboards.
+// Since node-exporter uses hostNetwork, we target the node IP directly with port 9100.
 discovery.relabel "node_exporter" {
   targets = discovery.kubernetes.nodes.targets
   rule {
-    // Replace the default kubelet port with node-exporter's port
+    // Replace the kubelet port (10250) with node-exporter's port (9100)
     source_labels = ["__address__"]
     regex         = "([^:]+)(:\\d+)?"
     replacement   = "$1:9100"
@@ -266,8 +308,10 @@ prometheus.scrape "node_exporter" {
   forward_to      = [prometheus.remote_write.mimir.receiver]
 }
 
-// ── kube-state-metrics ───────────────────────────────────────────────────────
-
+// ── kube-state-metrics ────────────────────────────────────────────────────────
+// kube-state-metrics translates Kubernetes object state (pod phases, deployment
+// replica counts, HPA desired vs actual, etc.) into Prometheus metrics.
+// This powers alerts like "deployment has unavailable replicas" and "HPA at max".
 discovery.kubernetes "ksm_service" {
   role = "service"
   namespaces {
@@ -300,19 +344,21 @@ prometheus.scrape "kube_state_metrics" {
   forward_to      = [prometheus.remote_write.mimir.receiver]
 }
 
-// ── API server metrics (filtered) ────────────────────────────────────────────
-
+// ── API server metrics (filtered) ─────────────────────────────────────────────
+// The Kubernetes API server exposes audit and latency metrics.
+// We keep only a subset — the full set is enormous (10k+ series).
 prometheus.scrape "apiserver" {
   scrape_interval   = "30s"
   targets           = [{"__address__" = "kubernetes.default.svc:443", "job" = "apiserver"}]
   scheme            = "https"
   bearer_token_file = "/var/run/secrets/kubernetes.io/serviceaccount/token"
   tls_config {
-    ca_file = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+    ca_file = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"   // cluster CA, not self-signed
   }
   forward_to = [prometheus.relabel.apiserver_keep.receiver]
 }
 
+// Keep only the series that power our API server dashboards and alerts
 prometheus.relabel "apiserver_keep" {
   rule {
     source_labels = ["__name__"]
@@ -322,8 +368,11 @@ prometheus.relabel "apiserver_keep" {
   forward_to = [prometheus.remote_write.mimir.receiver]
 }
 
-// ── Logs ──────────────────────────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════════
+// LOGS PIPELINE
+// ═══════════════════════════════════════════════════════════════════════════════
 
+// Destination: Loki push endpoint
 loki.write "loki" {
   endpoint {
     url = sys.env("LOKI_PUSH_URL")
@@ -331,6 +380,8 @@ loki.write "loki" {
   external_labels = {cluster = sys.env("CLUSTER")}
 }
 
+// Relabeling for pod logs — adds standard labels (namespace, pod, container, node, service)
+// Same label set as metrics so LogQL queries match Mimir queries for correlation.
 discovery.relabel "pod_logs" {
   targets = discovery.relabel.live_pods.output
   rule {
@@ -376,13 +427,25 @@ discovery.relabel "pod_logs" {
   }
 }
 
+// Tail pod logs via the Kubernetes log API (same as kubectl logs)
 loki.source.kubernetes "pods" {
   targets    = discovery.relabel.pod_logs.output
   forward_to = [loki.process.pods.receiver]
 }
 
-// Level label: read from JSON (structured) or guessed from plain text
+// ── Log processing pipeline ────────────────────────────────────────────────────
+// Normalises the "level" label across all pods regardless of their log format.
+// Without this, Grafana can't filter by level across services that use different words
+// (e.g. one app logs "WARNING", another logs "WARN", another logs "warning").
+//
+// Two branches:
+//   1. JSON logs (starts with { ): extract level and traceId from JSON fields
+//   2. Plain text logs: regex-extract level from anywhere in the line
+//
+// Normalisation: "warning" and "critical" are mapped to "warn" and "fatal" respectively
+// to match Loki's standard level vocabulary.
 loki.process "pods" {
+  // Branch 1: structured JSON logs
   stage.match {
     selector = "{namespace=~\".+\"} |~ \"^[ \\t]*[{]\""
     stage.json {
@@ -396,6 +459,7 @@ loki.process "pods" {
       values = {level = "level", traceId = "trace_id"}
     }
   }
+  // Branch 2: plain text logs — regex-extract level from anywhere in the line
   stage.match {
     selector = "{namespace=~\".+\"} !~ \"^[ \\t]*[{]\""
     stage.regex {
@@ -412,8 +476,10 @@ loki.process "pods" {
   forward_to = [loki.write.loki.receiver]
 }
 
-// ── Kubernetes events (scheduling, probe failures, OOM, image pulls) ──────────
-
+// ── Kubernetes events ──────────────────────────────────────────────────────────
+// K8s events (OOMKilled, ImagePullBackOff, Probe failures, scheduling failures)
+// are normally only visible via kubectl describe. Shipping them to Loki means
+// they appear alongside application logs in Grafana — critical for incident analysis.
 loki.source.kubernetes_events "events" {
   log_format = "json"
   forward_to = [loki.process.events.receiver]
@@ -426,8 +492,17 @@ loki.process "events" {
   forward_to = [loki.write.loki.receiver]
 }
 
-// ── Traces — OTLP receiver ───────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════════
+// TRACES PIPELINE
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+// The backend app sends OTLP traces to Alloy's gRPC endpoint (port 4317).
+// The NetworkPolicy in k8s/network-policy.yaml allows this specific egress.
+// Alloy batches the spans and forwards them to Tempo.
+//
+// Flow: backend pod → OTLP gRPC:4317 → Alloy → transform → batch → Tempo
 
+// Listen for OTLP spans on gRPC:4317 and HTTP:4318
 otelcol.receiver.otlp "default" {
   grpc {
     endpoint = "0.0.0.0:4317"
@@ -440,9 +515,11 @@ otelcol.receiver.otlp "default" {
   }
 }
 
-// Tag every span with the cluster name
+// Add k8s.cluster.name attribute to every span resource.
+// This is essential if Tempo is later shared across multiple clusters —
+// you can filter by cluster in TraceQL queries.
 otelcol.processor.transform "cluster" {
-  error_mode = "ignore"
+  error_mode = "ignore"   // don't drop spans if the transform fails
   trace_statements {
     context    = "resource"
     statements = ["set(attributes[\"k8s.cluster.name\"], \"" + sys.env("CLUSTER") + "\")"]
@@ -452,12 +529,16 @@ otelcol.processor.transform "cluster" {
   }
 }
 
+// Batch spans before sending to Tempo — reduces HTTP overhead and improves throughput
 otelcol.processor.batch "default" {
   output {
     traces = [otelcol.exporter.otlp.tempo.input]
   }
 }
 
+// Forward batched spans to Tempo via OTLP gRPC
+// insecure = true: in-cluster traffic between monitoring namespace pods;
+// mutual TLS not needed here (network is already isolated by NetworkPolicy).
 otelcol.exporter.otlp "tempo" {
   client {
     endpoint = sys.env("TEMPO_OTLP")

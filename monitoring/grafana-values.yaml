@@ -1,25 +1,54 @@
-replicas: 1
+# ── Grafana Helm values ────────────────────────────────────────────────────────
+#
+# PURPOSE:
+#   Configures the Grafana dashboard server deployed via the grafana Helm chart
+#   into the monitoring namespace. This file covers:
+#     - Admin credentials from Key Vault (not hardcoded)
+#     - Sidecar auto-discovery of dashboards and alert rules from ConfigMaps
+#     - Three pre-wired datasources: Mimir (metrics), Loki (logs), Tempo (traces)
+#     - Workload identity for passwordless Key Vault access
+#     - Security hardening
+#
+# CREDENTIAL FLOW (how admin password gets into Grafana without being in Git):
+#   1. terraform.tfvars → terraform apply → Key Vault secret
+#   2. CSI driver (extraVolumes below) mounts KV secrets as files
+#   3. SecretProviderClass (k8s/monitoring/secret-provider-grafana.yaml) syncs
+#      files → grafana-admin-secret Kubernetes Secret
+#   4. admin.existingSecret tells Grafana to read from that k8s Secret
+#
 
+replicas: 1  # single Grafana instance; PVC stores state
+
+# Schedule on user node pool (not system pool)
 nodeSelector:
   kubernetes.azure.com/mode: user
 
+# ── Admin credentials ──────────────────────────────────────────────────────────
+# Read from a Kubernetes Secret created by the CSI driver (not hardcoded here).
+# The Secret is populated from Key Vault via the CSI extraVolumes below.
 admin:
   existingSecret: grafana-admin-secret
   userKey: admin-user
   passwordKey: admin-password
 
+# Alloy scrapes Grafana's own /metrics for health monitoring
 podAnnotations:
   prometheus.io/scrape: "true"
   prometheus.io/port: "3000"
   prometheus.io/path: /metrics
 
+# ── Persistent storage ─────────────────────────────────────────────────────────
+# Grafana stores its SQLite database, provisioned datasource state, and plugins here.
+# managed-premium: Azure Premium SSD — fast random I/O for the SQLite database.
 persistence:
   enabled: true
   size: 5Gi
   storageClassName: managed-premium
 
+# disabled: our securityContext fsGroup already makes the PVC writable.
+# Enabling this would try to chown files as root, which fails with dropped capabilities.
 initChownData:
-  enabled: false   # fsGroup already makes the PVC writable; root chown fails with dropped caps
+  enabled: false
 
 resources:
   requests:
@@ -29,18 +58,31 @@ resources:
     cpu: 500m
     memory: 1Gi
 
+# ── Security hardening ─────────────────────────────────────────────────────────
+# runAsUser 472 = official Grafana UID in the container image
 securityContext:
   runAsNonRoot: true
   runAsUser: 472
   runAsGroup: 472
-  fsGroup: 472
+  fsGroup: 472   # PVC files owned by group 472 — Grafana can write its db
 containerSecurityContext:
   allowPrivilegeEscalation: false
-  readOnlyRootFilesystem: false   # Grafana writes its db and plugins under /var/lib/grafana (PVC)
+  readOnlyRootFilesystem: false  # Grafana writes plugins/db under /var/lib/grafana (PVC mount)
   capabilities:
     drop: [ALL]
 
-# Dashboard and alert sidecars — watch labeled ConfigMaps in monitoring namespace
+# ── Sidecar containers for auto-discovery ──────────────────────────────────────
+# Grafana runs two sidecar containers that watch for ConfigMaps in the monitoring namespace.
+# When a matching ConfigMap appears (or is updated), the sidecar loads it into Grafana
+# without a restart. No manual provisioning files needed.
+#
+# DASHBOARD sidecar: watches ConfigMaps labelled grafana_dashboard: "1"
+#   - Our k8s/monitoring/ ConfigMaps carry this label
+#   - folderAnnotation: ConfigMaps can set grafana_folder to organise dashboards into folders
+#
+# ALERT sidecar: watches ConfigMaps labelled grafana_alert: "1"
+#   - grafana-alert-rules.yaml carries this label
+#   - Grafana imports the alert rules and evaluates them against Mimir data
 sidecar:
   dashboards:
     enabled: true
@@ -59,11 +101,19 @@ sidecar:
     requests: {cpu: 20m, memory: 128Mi}
     limits: {memory: 256Mi}
 
+# ── Datasources ────────────────────────────────────────────────────────────────
+# Three datasources wired together so Grafana can jump between metrics → logs → traces.
+# This is the "three pillars of observability" in one UI.
 datasources:
   datasources.yaml:
     apiVersion: 1
     datasources:
-      # Mimir — metrics (fully Prometheus-compatible, drop-in)
+
+      # ── Mimir (metrics) ───────────────────────────────────────────────────────
+      # Mimir is Grafana's long-term metrics store, 100% Prometheus-compatible.
+      # We use type: prometheus because Mimir speaks the same HTTP API.
+      # isDefault: true means PromQL panels use Mimir unless overridden.
+      # exemplarTraceIdDestinations: clicking a Prometheus exemplar jumps to Tempo trace.
       - name: Mimir
         uid: mimir
         type: prometheus
@@ -73,14 +123,18 @@ datasources:
         jsonData:
           httpMethod: POST
           prometheusType: Mimir
-          timeInterval: "30s"
-          manageAlerts: false
+          timeInterval: "30s"    # match Alloy's scrape interval so panels don't show gaps
+          manageAlerts: false    # alerts are managed by Grafana's own unified alerting
           exemplarTraceIdDestinations:
             - name: trace_id
               datasourceUid: tempo
               urlDisplayLabel: "View Trace"
 
-      # Loki — logs with traceId derived field for logs→traces jump
+      # ── Loki (logs) ──────────────────────────────────────────────────────────
+      # Loki stores log lines shipped by Alloy from every pod.
+      # derivedFields: if a log line contains a "traceId" JSON field,
+      # Grafana renders a "View Trace in Tempo" link next to that log entry.
+      # This is the logs→traces cross-link (one of the three pillars jumps).
       - name: Loki
         uid: loki
         type: loki
@@ -91,12 +145,17 @@ datasources:
           manageAlerts: false
           derivedFields:
             - name: trace_id
-              matcherRegex: '"traceId":\s*"(\w+)"'
+              matcherRegex: '"traceId":\s*"(\w+)"'   # matches JSON: {"traceId": "abc123..."}
               url: "$${__value.raw}"
               datasourceUid: tempo
               urlDisplayLabel: "View Trace in Tempo"
 
-      # Tempo — distributed traces (TraceQL)
+      # ── Tempo (distributed traces) ────────────────────────────────────────────
+      # Tempo stores OTLP traces sent by the backend via Alloy.
+      # tracesToLogsV2: from a trace span, jump to Loki logs (±5m time window, by traceID)
+      # tracesToMetrics: from a span, jump to Mimir for RED metrics (rate/errors/duration)
+      # serviceMap: Tempo queries Mimir for pre-built service dependency graph
+      # nodeGraph: visual graph of service calls in the trace
       - name: Tempo
         uid: tempo
         type: tempo
@@ -121,39 +180,51 @@ datasources:
           nodeGraph:
             enabled: true
 
+# ── Grafana INI configuration ──────────────────────────────────────────────────
 grafana.ini:
   server:
     domain: peerisland.centralindia.cloudapp.azure.com
+    # serve_from_sub_path: true + root_url with /grafana/ path means Grafana
+    # is accessible at https://<domain>/grafana/ (not at root /)
+    # The ingress strips /grafana prefix and adds it back via the annotations.
     root_url: "https://peerisland.centralindia.cloudapp.azure.com/grafana/"
     serve_from_sub_path: true
   analytics:
-    reporting_enabled: false
+    reporting_enabled: false    # don't phone home to Grafana Labs
     check_for_updates: false
   log:
-    mode: console
+    mode: console    # JSON logs go to stdout → Alloy picks them up
   log.console:
     format: json
   security:
-    disable_gravatar: true
-    cookie_secure: true
-    strict_transport_security: true
+    disable_gravatar: true        # no external requests to gravatar.com
+    cookie_secure: true           # only send session cookie over HTTPS
+    strict_transport_security: true  # HSTS header
   users:
-    allow_sign_up: false
+    allow_sign_up: false    # no self-registration — admin only
   auth.anonymous:
-    enabled: false
+    enabled: false          # no anonymous access
   unified_alerting:
-    enabled: true
+    enabled: true           # Grafana manages its own alert rules (not Alertmanager)
   feature_toggles:
-    enable: traceqlEditor tempoSearch
+    enable: traceqlEditor tempoSearch  # enable TraceQL query editor in Tempo panel
 
+# ── Service Account with workload identity annotation ─────────────────────────
+# azure.workload.identity/client-id: tells Azure which managed identity this pod maps to.
+# The federated credential in Terraform (aks module) ties this SA to the KV secrets
+# provider identity, allowing the CSI driver to authenticate to Key Vault without
+# any stored credentials.
 serviceAccount:
   create: true
   autoMount: true
   annotations:
     azure.workload.identity/client-id: "bac5c66c-be80-410d-b860-d9238d14655b"
 
-# Key Vault CSI driver — mounts grafana-admin-{user,password} from KV and syncs to grafana-admin-secret
-# SecretProviderClass is in k8s/monitoring/secret-provider-grafana.yaml
+# ── CSI driver volume — Key Vault secrets mount ───────────────────────────────
+# The CSI driver mounts grafana-admin-{user,password} from Key Vault as files at
+# /mnt/grafana-secrets/. The SecretProviderClass also syncs them into
+# grafana-admin-secret Kubernetes Secret (which the admin.existingSecret above reads).
+# SecretProviderClass definition: k8s/monitoring/secret-provider-grafana.yaml
 extraVolumes:
   - name: grafana-kv-secrets
     csi:
@@ -167,5 +238,7 @@ extraVolumeMounts:
     mountPath: /mnt/grafana-secrets
     readOnly: true
 
+# Ingress is managed separately by argocd/ingresses/grafana-ingress.yaml.
+# Disabling here avoids a duplicate Ingress resource that would conflict.
 ingress:
-  enabled: false   # managed by argocd/ingresses/grafana-ingress.yaml
+  enabled: false

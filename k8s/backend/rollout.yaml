@@ -1,3 +1,25 @@
+# ── Argo Rollouts BlueGreen deployment for the backend ────────────────────────
+#
+# WHY Rollout instead of Deployment?
+#   Kubernetes Deployment only supports RollingUpdate — it gradually replaces old
+#   pods with new ones. That means both versions serve traffic simultaneously
+#   during the cutover, and the only rollback is a new rolling update.
+#
+#   Argo Rollouts BlueGreen runs the NEW version (green/preview) completely
+#   alongside the OLD version (blue/active), lets you validate the green version
+#   against real traffic on its preview service, and then switches ALL traffic
+#   atomically by flipping the active Service selector.  Rollback is instant —
+#   just flip the selector back; no new pods to wait for.
+#
+# HOW it works in this stack:
+#   1. CI builds a new image and updates k8s/overlays/production/kustomization.yaml
+#   2. ArgoCD detects the Git change and applies this Rollout manifest
+#   3. Argo Rollouts creates the new (green) pods pointed at by previewService
+#   4. You test the preview endpoint, then promote:
+#        kubectl argo rollouts promote backend -n peerisland
+#   5. Active Service selector switches from blue to green; green pods serve prod
+#   6. Blue pods stay alive 30s (scaleDownDelaySeconds) to drain in-flight requests
+#
 apiVersion: argoproj.io/v1alpha1
 kind: Rollout
 metadata:
@@ -6,77 +28,126 @@ metadata:
   labels:
     app: backend
 spec:
+  # Baseline replica count — HPA overrides this at runtime based on load.
+  # ignoreDifferences in peerisland-app.yaml tells ArgoCD not to flag this drift.
   replicas: 2
+
+  # Keep last 3 ReplicaSet revisions for fast rollback
   revisionHistoryLimit: 3
+
   selector:
     matchLabels:
       app: backend
 
+  # ── BlueGreen strategy ─────────────────────────────────────────────────────
   strategy:
     blueGreen:
-      # active-service receives production traffic (blue/stable)
+      # activeService always points at the STABLE (blue) version.
+      # This is what ingress-nginx routes production traffic to.
       activeService: backend-active
-      # preview-service receives the new version (green/candidate)
+
+      # previewService points at the NEW (green) version.
+      # QA/validation hits this endpoint before promotion.
       previewService: backend-preview
-      # Require a manual promotion — never auto-promote in production
+
+      # NEVER auto-promote in production — a human must run:
+      #   kubectl argo rollouts promote backend -n peerisland
+      # This prevents a bad image from going live automatically.
       autoPromotionEnabled: false
-      # Keep old (blue) pods running 30s after promotion so in-flight requests finish
+
+      # Keep old (blue) pods alive for 30s after promotion.
+      # In-flight HTTP requests that arrived just before the switch finish cleanly.
       scaleDownDelaySeconds: 30
-      # Allow full preview replica count during the switchover window
+
+      # Run 2 green (preview) pods during the validation window — same as prod
+      # so you can load-test the preview before promoting.
       previewReplicaCount: 2
-      # Abort and scale down preview if the Rollout resource is deleted
+
+      # If the Rollout is aborted (bad health check), scale down preview within 30s
       abortScaleDownDelaySeconds: 30
 
+  # ── Pod template ──────────────────────────────────────────────────────────
   template:
     metadata:
       labels:
         app: backend
       annotations:
+        # Tells Alloy (Grafana's collector) to scrape this pod for Prometheus metrics.
+        # Alloy uses annotation-based service discovery — no ServiceMonitor CRD needed.
         prometheus.io/scrape: "true"
         prometheus.io/port: "3001"
         prometheus.io/path: "/metrics"
     spec:
+      # Kubernetes service account with OIDC workload identity annotation.
+      # Allows the pod to authenticate to Azure Key Vault without a stored secret.
       serviceAccountName: peerisland-sa
+
+      # ── Pod-level security hardening ──────────────────────────────────────
       securityContext:
+        # Refuse to run as root — defence against container escape
         runAsNonRoot: true
-        runAsUser: 1001
-        fsGroup: 1001
+        runAsUser: 1001       # unprivileged UID defined in the Dockerfile
+        fsGroup: 1001         # volume mounts owned by this group
         seccompProfile:
-          type: RuntimeDefault
+          type: RuntimeDefault  # syscall filtering via the node's default seccomp profile
+
       containers:
         - name: backend
+          # PLACEHOLDER_ACR is replaced at deploy time by kustomize edit set image
           image: PLACEHOLDER_ACR/backend:latest
-          imagePullPolicy: Always
+          imagePullPolicy: Always  # always pull so :latest is never stale
+
           ports:
             - containerPort: 3001
               name: http
+
           env:
             - name: PORT
               value: "3001"
             - name: NODE_ENV
               value: "production"
+
+            # ── OpenTelemetry tracing config ────────────────────────────────
+            # The backend exports OTLP traces to Grafana Alloy running in the
+            # monitoring namespace. Alloy batches them and forwards to Tempo.
             - name: OTEL_SERVICE_NAME
               value: "peerisland-backend"
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              # Cluster-DNS name: alloy listens on 4317 for gRPC OTLP
               value: "http://alloy-otlp.monitoring.svc.cluster.local:4317"
             - name: OTEL_RESOURCE_ATTRIBUTES
               value: "deployment.environment=production,service.version=1.0.0"
             - name: OTEL_TRACES_SAMPLER
+              # parentbased_traceidratio: honour the sampling decision of the caller;
+              # if no caller, sample at the ratio below.
               value: "parentbased_traceidratio"
             - name: OTEL_TRACES_SAMPLER_ARG
+              # 10% head-based sampling — keeps Tempo storage affordable.
+              # Bump to 1.0 temporarily when debugging a specific flow.
               value: "0.1"
+
+          # ── Resource budget ────────────────────────────────────────────────
+          # requests: what Kubernetes reserves on the node (scheduler uses this).
+          # limits:   hard cap; hitting CPU limit throttles; hitting memory OOM-kills.
+          # VPA may adjust requests over time based on actual usage history.
           resources:
             requests:
-              cpu: "100m"
+              cpu: "100m"      # 0.1 vCPU reserved; VPA will tune upward if needed
               memory: "128Mi"
             limits:
-              cpu: "1000m"
-              memory: "512Mi"
+              cpu: "1000m"     # 1 vCPU max; throttled not killed if exceeded
+              memory: "512Mi"  # OOM-killed if exceeded — keep headroom above requests
+
+          # ── Health probes ──────────────────────────────────────────────────
+          # livenessProbe: if this fails 3×, Kubernetes RESTARTS the container.
+          # readinessProbe: if this fails, pod removed from Service endpoints
+          #   (stops receiving traffic) but NOT restarted.
+          # Both probe /health so the app can report its own status.
           livenessProbe:
             httpGet:
               path: /health
               port: 3001
-            initialDelaySeconds: 15
+            initialDelaySeconds: 15  # wait for Node.js startup before probing
             periodSeconds: 20
             failureThreshold: 3
           readinessProbe:
@@ -86,17 +157,28 @@ spec:
             initialDelaySeconds: 5
             periodSeconds: 10
             failureThreshold: 3
+
+          # ── Container-level security hardening ────────────────────────────
           securityContext:
-            allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false  # cannot gain more privs than parent process
+            readOnlyRootFilesystem: true      # filesystem is immutable; writes only to /tmp
             capabilities:
-              drop: ["ALL"]
+              drop: ["ALL"]  # remove all Linux capabilities (NET_RAW, SYS_ADMIN, etc.)
+
           volumeMounts:
             - name: tmp
-              mountPath: /tmp
+              mountPath: /tmp  # writable scratch space for Node.js temp files
+
       volumes:
+        # emptyDir is ephemeral (gone when pod dies) and isolated per pod.
+        # Required because readOnlyRootFilesystem: true blocks all other writes.
         - name: tmp
           emptyDir: {}
+
+      # ── Topology spread — spread pods across different nodes ───────────────
+      # maxSkew: 1 means at most 1 more pod on any node than any other node.
+      # DoNotSchedule: rather than violating the spread, refuse to schedule.
+      # This ensures a single node failure never takes down both replicas.
       topologySpreadConstraints:
         - maxSkew: 1
           topologyKey: kubernetes.io/hostname

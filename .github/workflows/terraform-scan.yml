@@ -1,21 +1,47 @@
+# ── Terraform Security Scan: Checkov + Terrascan ─────────────────────────────
+#
+# PURPOSE:
+#   Automatically scan Terraform code for security misconfigurations before
+#   changes reach the main branch or are applied to infrastructure.
+#
+# WHEN does it run?
+#   - On every PR that touches terraform/ files (gate before merge)
+#   - On push to main where terraform/ changed (audit of what's already merged)
+#
+# TWO SCANNERS for defence-in-depth:
+#   1. Checkov (Bridgecrew): Industry-standard IaC scanner, 1000+ rules.
+#      Outputs SARIF → uploaded to GitHub Security tab (Dependabot-style UI).
+#      BLOCKS the pipeline on failure (soft_fail: false).
+#      Skip CKV_AZURE_168: private AKS cluster requires VPN/jumpbox not in scope.
+#
+#   2. Terrascan (Tenable): Azure policy pack, different rule set than Checkov.
+#      Provides second opinion — a finding missed by Checkov may be caught here.
+#      SARIF output also available.
+#
+# HOW findings appear:
+#   - GitHub Security tab → Code scanning → filter by "Checkov" or "Terrascan"
+#   - Each finding links to the exact line number in the Terraform file
+#   - PR checks show "Security scanning / Checkov Scan" as a required status
+#
 name: Terraform Security Scan
 
 on:
   pull_request:
     paths:
-      - "terraform/**"
+      - "terraform/**"   # only trigger when terraform files change
   push:
     branches: [main]
     paths:
       - "terraform/**"
 
 jobs:
+  # ── Job 1: Checkov ───────────────────────────────────────────────────────────
   checkov:
     name: Checkov Scan
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      security-events: write  # Required for SARIF upload
+      security-events: write  # required to upload SARIF to GitHub Security tab
 
     steps:
       - name: Checkout
@@ -29,14 +55,15 @@ jobs:
           framework: terraform
           output_format: sarif
           output_file_path: checkov-results.sarif
-          soft_fail: false
+          soft_fail: false   # fail the job if any check fails (not soft/warning mode)
           skip_check: >-
             CKV_AZURE_168
           # CKV_AZURE_168 (private cluster) is skipped because private clusters
-          # require additional VPN/bastion setup outside assignment scope.
-          # Set private_cluster_enabled = true in production.
+          # require a VPN/jumpbox setup outside this assignment's scope.
+          # In production: set private_cluster_enabled = true in terraform/modules/aks/main.tf.
 
       - name: Upload SARIF to GitHub Security tab
+        # always() = upload even if Checkov found issues (so we can SEE the findings)
         if: always()
         uses: github/codeql-action/upload-sarif@v3
         with:
@@ -48,6 +75,7 @@ jobs:
           echo "### Checkov Scan Results" >> $GITHUB_STEP_SUMMARY
           echo "See Security tab → Code scanning for detailed findings." >> $GITHUB_STEP_SUMMARY
 
+  # ── Job 2: Terrascan ─────────────────────────────────────────────────────────
   terrascan:
     name: Terrascan Scan
     runs-on: ubuntu-latest
@@ -59,10 +87,11 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Run Terrascan
+        # Tenable's official action — applies Azure policy pack to our terraform/
         uses: tenable/terrascan-action@main
         with:
           iac_type: terraform
           iac_dir: terraform/
-          policy_type: azure
-          only_warn: false
-          sarif_upload: true
+          policy_type: azure     # Azure-specific policy rules
+          only_warn: false       # treat findings as errors, not just warnings
+          sarif_upload: true     # output in SARIF format for Security tab

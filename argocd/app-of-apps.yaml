@@ -1,11 +1,35 @@
-﻿# Root Application â€” syncs argocd/applications/ from Git.
-# Apply this once manually:  kubectl apply -f argocd/app-of-apps.yaml
-# After that ArgoCD owns everything, including the child Application objects.
+﻿# ── ArgoCD App-of-Apps pattern — root Application ────────────────────────────
+#
+# CONCEPT: App-of-Apps
+#   Instead of manually applying each ArgoCD Application manifest, we create
+#   ONE root Application that watches the argocd/applications/ directory in Git.
+#   Every .yaml file in that directory is itself an ArgoCD Application manifest.
+#   ArgoCD syncs the root → root creates/updates the child Applications →
+#   each child Application syncs its own workloads.
+#
+# BOOTSTRAP (run ONCE manually):
+#   kubectl apply -f argocd/app-of-apps.yaml
+#   After this single command, ArgoCD owns everything. Any new Application
+#   added to argocd/applications/ in Git will be automatically deployed.
+#
+# HOW selfHeal works:
+#   If someone deletes or edits a child Application in the cluster directly,
+#   ArgoCD detects the drift from Git and re-applies the correct state.
+#   This enforces Git as the single source of truth.
+#
+# HOW prune works:
+#   If you delete an Application .yaml from argocd/applications/ in Git,
+#   ArgoCD deletes the corresponding Application object from the cluster.
+#   The finalizer (resources-finalizer) ensures the Application's child
+#   resources (Deployments, Services, etc.) are cleaned up first.
+#
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
   name: root
   namespace: argocd
+  # Finalizer: when this Application is deleted, ArgoCD cascades the deletion
+  # to all resources it manages before removing the Application itself.
   finalizers:
     - resources-finalizer.argocd.argoproj.io
 spec:
@@ -14,15 +38,20 @@ spec:
   source:
     repoURL: https://github.com/krishnakant888/peerisland.git
     targetRevision: main
-    path: argocd/applications   # contains all child Application manifests
+    # ArgoCD watches THIS directory for Application manifests (the children)
+    path: argocd/applications
 
   destination:
     server: https://kubernetes.default.svc
-    namespace: argocd           # Application CRs live in the argocd namespace
+    # Application CRs (child Applications) must live in the argocd namespace
+    namespace: argocd
 
   syncPolicy:
     automated:
-      prune: true       # removes Application objects deleted from Git
+      # Remove Application objects from the cluster when their .yaml is deleted from Git
+      prune: true
+      # Revert any manual changes made directly to the cluster
       selfHeal: true
     syncOptions:
+      # ArgoCD will create the argocd namespace if it doesn't exist
       - CreateNamespace=true
