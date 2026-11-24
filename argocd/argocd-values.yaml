@@ -1,3 +1,38 @@
+# ── ArgoCD Helm values ────────────────────────────────────────────────────────
+#
+# PURPOSE: Configures ArgoCD — the GitOps engine that watches this git repo and
+#   continuously reconciles the cluster state to match what's in git.
+#
+# HOW ARGOCD WORKS (for interviewers):
+#   1. app-of-apps.yaml defines a parent Application pointing to argocd/applications/
+#   2. ArgoCD syncs the parent → discovers all child Application manifests
+#   3. For each child app, ArgoCD clones the target path and applies manifests
+#   4. It continuously diffs live cluster state vs. desired git state (every 3 min)
+#   5. If drift detected: selfHeal=true means it auto-reverts unauthorized changes
+#
+# NODE PLACEMENT: system node only — ArgoCD is infrastructure, not an app.
+#   The CriticalAddonsOnly toleration lets it run on system nodes despite the taint.
+#   The YAML anchor (*systemNode) is reused on every component to keep it DRY.
+#
+# RESOURCE SIZING RATIONALE:
+#   - controller (1500m/1Gi): reconciles all 15+ apps; memory grows with app count
+#   - repoServer (1000m/512Mi): clones repos + runs kustomize; OOMKills cause global rpc errors
+#   - server (500m/128Mi): just a UI + API proxy, very lightweight
+#
+# RBAC: policy.default: role:readonly — everyone can VIEW, only peerisland-admins
+#   group (SSO-mapped) can deploy. This prevents read-only users from accidentally
+#   triggering syncs or deletes.
+#
+# kustomize.buildOptions: "--load-restrictor LoadRestrictionsNone"
+#   Required for overlays that use ../../ path traversal (k8s/overlays/production
+#   references k8s/base/ which is two levels up). Without this flag, kustomize
+#   refuses to load resources outside its own directory.
+#
+# HEALTH CHECKS (Lua scripts): the APIService health check is a custom Lua
+#   function that tells ArgoCD how to determine if an APIService is healthy.
+#   Without it, ArgoCD always shows APIService as "Unknown" because it doesn't
+#   know the right status field to check.
+#
 # ArgoCD is platform infrastructure — it belongs on the system node alongside
 # kube-system components, not competing with application workloads on user nodes.
 # All components are pinned to the system node so they communicate locally

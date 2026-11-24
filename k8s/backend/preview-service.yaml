@@ -1,3 +1,18 @@
+# ── Backend Preview Service (BlueGreen — green/new traffic) ──────────────────
+#
+# PURPOSE: Receives traffic routed to the NEW (green) version of the backend
+#   during an active rollout — for testing before production promotion.
+#
+# BLUEGREEN MECHANICS:
+#   During a rollout: selector → pods with rollout-id=<new-hash> (green)
+#   Not in rollout:   selector points to no pods → returns 503 (safe)
+#
+# The Ingress routes /preview/api → backend-preview:80.
+#   QA team hits /preview/api to test the new API version.
+#   If tests pass: `argocd app actions run peerisland-app promote` → Rollouts
+#     swaps active/preview selectors atomically, shifting 100% traffic to green.
+#   If tests fail: rollout is aborted, blue pods continue serving, green pods deleted.
+
 apiVersion: v1
 kind: Service
 metadata:

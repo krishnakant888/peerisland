@@ -1,3 +1,20 @@
+# ── Backend Service (ClusterIP) ───────────────────────────────────────────────
+#
+# PURPOSE: Generic cluster-internal service for backend pods — used for
+#   pod-to-pod communication within the cluster (e.g., frontend calling backend
+#   via http://backend.peerisland.svc.cluster.local/api).
+#
+# WHY THREE SERVICES for one workload?
+#   Argo Rollouts BlueGreen requires a 3-service pattern:
+#     backend         (this file) — generic, pod-to-pod internal calls
+#     backend-active  — Rollouts switches this selector to blue or green pods
+#     backend-preview — Rollouts switches this selector to the other set
+#
+#   The Rollout controller updates the selectors of active/preview automatically
+#   during a rollout. This ClusterIP service's selector always points to ALL
+#   backend pods regardless of which color they are — used for internal service
+#   mesh communication that doesn't need BlueGreen routing.
+
 apiVersion: v1
 kind: Service
 metadata:

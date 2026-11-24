@@ -1,4 +1,28 @@
-﻿apiVersion: argoproj.io/v1alpha1
+﻿# ── ArgoCD Application: monitoring-loki ──────────────────────────────────────
+#
+# PURPOSE: Deploys Grafana Loki — the log aggregation backend.
+#   Alloy tails all pod logs from /var/log/pods/* and pushes them to Loki.
+#   Grafana connects to Loki as a datasource and renders logs alongside metrics
+#   and traces in the same dashboard panel (unified observability).
+#
+# LOG FLOW:
+#   Pod stdout/stderr → Alloy (DaemonSet on every node) → Loki ingest API
+#   → Grafana Explore (LogQL queries) or correlated in trace panels
+#
+# WHY LOKI instead of Elasticsearch?
+#   Loki indexes only labels (namespace, pod, app), not the full log text.
+#   This makes storage ~10x cheaper than Elasticsearch for the same volume.
+#   The tradeoff: full-text search is regex-based (slower for complex patterns).
+#   For a startup-scale SaaS with structured JSON logs, Loki is the right fit.
+#
+# SYNC WAVE 1: deployed before Grafana (wave 2). Grafana's datasource probe
+#   hits Loki on startup — if Loki isn't ready, the datasource shows as degraded
+#   and log panels fail until the next manual refresh.
+#
+# STORAGE: loki-values.yaml configures Azure Blob storage as the backend.
+#   Logs are NOT stored on PVCs — they go to object storage, so no PVC sizing needed.
+
+apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
   name: monitoring-loki

@@ -1,3 +1,40 @@
+# ── ArgoCD Prometheus Alert Rules ────────────────────────────────────────────
+#
+# PURPOSE: Defines Mimir alert rules for ArgoCD's own health — sync failures,
+#   app health degradation, repo-server OOMs, and reconciliation slowness.
+#
+# WHY ALERT ON ARGOCD ITSELF?
+#   ArgoCD is the deployment engine. If it goes silent (OutOfSync apps, failed
+#   syncs, OOMKilled repo-server), deployments stop working and you won't know
+#   until someone manually checks the UI. These alerts fire BEFORE that happens.
+#
+# KIND: PrometheusRule — this is a Prometheus Operator CRD (monitoring.coreos.com/v1).
+#   This stack uses Alloy+Mimir (not Prometheus Operator), so the label
+#   app.kubernetes.io/part-of: mimir tells Mimir's ruler to pick up this rule
+#   file via the ruler.storage configuration in mimir-values.yaml.
+#
+# ALERT GROUPS (documented lessons from real incidents):
+#
+#   argocd.sync:
+#     - ArgoCDAppOutOfSync — app drifted for >10 min (manual change in cluster?)
+#     - ArgoCDAppUnhealthy — pods crashlooping, PVC stuck, etc.
+#     - ArgoCDAppSyncFailed — merge error, kustomize build failure, missing secret
+#
+#   argocd.rpc:
+#     - ArgoCDGlobalRPCError — >40% apps Unknown (repo-server restarted; fix:
+#       kubectl rollout restart statefulset argocd-application-controller -n argocd)
+#     - ArgoCDManifestGenerationError — kustomize path traversal blocked, git timeout
+#
+#   argocd.reposerver:
+#     - ArgoCDRepoServerOOMKilled — OOMKill during large repo clone; raise memory limit
+#     - ArgoCDRepoServerHighMemory — warning before OOM (>450Mi of 512Mi limit)
+#     - ArgoCDRepoServerHighCPU — throttled during heavy sync; causes manifest timeouts
+#
+#   argocd.controller:
+#     - ArgoCDControllerOOMKilled — all reconciliation pauses; most severe alert
+#     - ArgoCDControllerHighMemory — warning before OOM
+#     - ArgoCDReconciliationQueueHigh — controller overloaded; reduce managed apps or raise resources
+
 apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule
 metadata:

@@ -1,3 +1,22 @@
+# ── ArgoCD Application: monitoring-kube-state-metrics ────────────────────────
+#
+# PURPOSE: Deploys kube-state-metrics (KSM) — exposes Kubernetes object state
+#   as Prometheus metrics so we can alert on pod failures, deployment progress,
+#   node conditions, PVC binding, etc. from Grafana.
+#
+# WHAT KSM EXPOSES (examples used in this stack):
+#   kube_pod_container_status_restarts_total — detects CrashLoopBackOff
+#   kube_deployment_status_replicas_unavailable — detects rollout failures
+#   kube_node_status_condition — detects NotReady nodes
+#   kube_persistentvolumeclaim_status_phase — detects stuck PVCs (Mimir/Loki)
+#
+# WHY NOT use the Prometheus Operator?
+#   This stack does NOT use Prometheus Operator. KSM is deployed standalone
+#   and scraped by Alloy's service discovery rules in monitoring/alloy/config.alloy.
+#
+# SYNC WAVE 1: deployed alongside other metric backends (Mimir, Loki, Tempo)
+#   before Grafana (wave 2) which consumes KSM metrics in its dashboards.
+
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:

@@ -1,3 +1,21 @@
+# ── ArgoCD Application: ingresses ────────────────────────────────────────────
+#
+# PURPOSE: Deploys the ArgoCD-specific Ingress rules so the ArgoCD UI is
+#   accessible at https://peerisland.centralindia.cloudapp.azure.com/argocd
+#
+# WHY A SEPARATE APP?
+#   ArgoCD's own Ingress can't live inside the argocd-values.yaml Helm chart
+#   with ServerSideApply, because Helm and SSA fight over field ownership.
+#   Keeping it in a separate kustomize app (argocd/ingresses/) allows full SSA.
+#
+# SYNC WAVE 2: ingress-nginx (wave 1) must exist before this Ingress is applied,
+#   otherwise the ingressClassName: nginx reference resolves to nothing and
+#   ArgoCD marks the resource as degraded.
+#
+# ServerSideApply: true — required for Ingress objects with annotations managed
+#   by cert-manager and nginx-ingress at the same time (each owns separate fields).
+#   Without SSA these two controllers collide and the annotation resets on every sync.
+
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:

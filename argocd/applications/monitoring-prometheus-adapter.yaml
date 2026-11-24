@@ -1,4 +1,28 @@
-﻿apiVersion: argoproj.io/v1alpha1
+﻿# ── ArgoCD Application: monitoring-prometheus-adapter ────────────────────────
+#
+# PURPOSE: Deploys the Prometheus Adapter — a bridge between the Kubernetes
+#   custom metrics API and Mimir, enabling HPA to scale on application metrics.
+#
+# WHY THIS IS CRITICAL for the HPA strategy:
+#   Standard HPA can only scale on CPU and memory. Our HPA scales on:
+#     - http_requests_per_second (primary — business traffic)
+#     - p99 latency (secondary — catches slow endpoints under load)
+#   These are custom metrics stored in Mimir. Without the adapter, the HPA
+#   controller cannot read them — `kubectl get hpa` would show <unknown>.
+#
+#   The adapter reads the custom metric queries from prometheus-adapter-values.yaml
+#   and registers them in the k8s custom metrics API (metrics.k8s.io). Then HPA
+#   can reference them by name in the HPA spec.
+#
+# SYNC WAVE 2: Mimir (wave 1) must be running and healthy so the adapter can
+#   connect on startup. If the adapter starts before Mimir, it registers the
+#   API service but queries return errors — HPA shows <unknown> and won't scale.
+#
+# ignoreDifferences on APIService caBundle: the adapter registers an APIService
+#   with a caBundle injected by cert-manager post-deploy. ArgoCD would loop
+#   trying to remove the caBundle — this entry prevents that.
+
+apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
   name: monitoring-prometheus-adapter

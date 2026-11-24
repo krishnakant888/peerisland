@@ -1,4 +1,32 @@
-﻿apiVersion: argoproj.io/v1alpha1
+﻿# ── ArgoCD Application: monitoring-tempo ─────────────────────────────────────
+#
+# PURPOSE: Deploys Grafana Tempo — the distributed tracing backend.
+#   App pods emit OpenTelemetry (OTLP) spans → Alloy receives on port 4317/4318
+#   → Alloy forwards to Tempo → Grafana queries Tempo to show trace waterfalls.
+#
+# WHY DISTRIBUTED TRACING matters:
+#   Logs and metrics tell you WHAT broke. Traces tell you WHERE in the call chain
+#   it broke and HOW LONG each step took. For example: a p99 latency spike in
+#   the backend alert fires — trace shows it's specifically the database query
+#   in the /api/sessions endpoint, not the app logic. Without traces, you'd grep
+#   logs for 20 minutes to find that.
+#
+# TRACE FLOW:
+#   Backend/frontend → OTLP gRPC → alloy-otlp:4317 (ClusterIP Service)
+#   → Alloy DaemonSet → Tempo ingest API → Tempo storage
+#   → Grafana "Explore" → trace waterfall view
+#
+# CORRELATED OBSERVABILITY: Grafana links traces to logs automatically via
+#   trace IDs in log lines (backend injects traceId into every structured log).
+#   Click a slow span → see its logs without a separate query.
+#
+# ignoreDifferences:
+#   - volumeClaimTemplates: immutable after StatefulSet creation; Tempo's chart
+#     generates them dynamically — ArgoCD sees drift we can't fix without delete.
+#   - ServiceAccount annotations: AKS Workload Identity injects the clientId
+#     annotation post-deploy; ignoring prevents revert loop.
+
+apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
   name: monitoring-tempo

@@ -1,3 +1,28 @@
+# ── ArgoCD Application: cert-manager-config ──────────────────────────────────
+#
+# PURPOSE: Deploys the ClusterIssuers — the ACME account configuration that
+#   tells cert-manager WHERE and HOW to get certificates.
+#
+# WHY SEPARATE from cert-manager app?
+#   ClusterIssuers use cert-manager CRDs. If we bundled them in the same sync
+#   wave as cert-manager itself, ArgoCD would try to apply ClusterIssuers before
+#   the CRDs exist and fail. Separating into wave 1 (after cert-manager wave 0)
+#   guarantees CRDs are installed first.
+#
+# WHAT'S IN argocd/cert-manager-config/:
+#   - selfsigned ClusterIssuer — for internal/dev certs, no CA needed
+#   - letsencrypt ClusterIssuer — free public CA, 50/week rate limit
+#   - zerossl ClusterIssuer — free public CA, NO rate limit (why we use it)
+#   - peerisland-ca ClusterIssuer — internal CA backed by self-signed root cert
+#
+# ACTIVE ISSUER: ZeroSSL (cert-manager.io/cluster-issuer: "zerossl" in ingress.yaml)
+#   ZeroSSL requires an External Account Binding (EAB) — the keyID and secret
+#   are stored in the zerossl-eab-secret Kubernetes Secret (pre-created manually).
+#
+# ServerSideApply: true — required for ClusterIssuers because cert-manager
+#   uses server-side apply to manage certificate fields. Without this, ArgoCD
+#   and cert-manager fight over field ownership and the sync never completes.
+
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:

@@ -1,3 +1,21 @@
+# ── OTLP Collector Service ────────────────────────────────────────────────────
+#
+# PURPOSE: Provides a stable ClusterIP DNS name (alloy-otlp.monitoring.svc.cluster.local)
+#   for backend/frontend pods to send OpenTelemetry traces to Alloy.
+#
+# WHY A SEPARATE SERVICE?
+#   Alloy runs as a DaemonSet — one pod per node. Without this Service, app pods
+#   would need to know which node they're on and send to that node's Alloy pod IP.
+#   This ClusterIP service load-balances across all Alloy pods — the app just calls
+#   alloy-otlp.monitoring:4317 and k8s routes to any available Alloy pod.
+#
+# PORTS:
+#   4317 — OTLP gRPC (preferred — lower overhead, better streaming)
+#   4318 — OTLP HTTP (fallback for environments where gRPC is blocked)
+#
+# APP CONFIGURATION: Set OTEL_EXPORTER_OTLP_ENDPOINT=http://alloy-otlp.monitoring:4317
+#   in backend/frontend pod env vars (see rollout.yaml) to use this service.
+#
 # Stable ClusterIP DNS name for the Alloy OTLP receiver.
 # Backend pods send traces here — decoupled from Alloy's pod name/IP.
 apiVersion: v1

@@ -1,3 +1,19 @@
+# ── Application Namespace: peerisland ────────────────────────────────────────
+#
+# PURPOSE: Creates the peerisland namespace — the isolation boundary for all
+#   app workloads (backend Rollout, frontend Rollout, services, Ingress, HPA/VPA/PDB).
+#
+# WHY A DEDICATED NAMESPACE?
+#   Kubernetes RBAC, NetworkPolicy, and ResourceQuota are all namespace-scoped.
+#   A dedicated namespace means:
+#   - NetworkPolicy can allow only specific cross-namespace traffic (monitoring → peerisland)
+#   - RBAC can grant CI/CD service accounts only the access they need
+#   - `kubectl get pods -n peerisland` shows exactly the app — no noise from kube-system
+#
+# This namespace is managed here (not by ArgoCD's CreateNamespace=true) so that
+# the labels and annotations are explicitly controlled in git, not auto-created
+# with defaults that might not match what NetworkPolicy expects.
+
 apiVersion: v1
 kind: Namespace
 metadata:

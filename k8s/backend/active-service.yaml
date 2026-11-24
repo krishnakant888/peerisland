@@ -1,3 +1,20 @@
+# ── Backend Active Service (BlueGreen — production traffic) ──────────────────
+#
+# PURPOSE: Receives 100% of production API traffic from the Ingress.
+#   Argo Rollouts manages this service's pod selector — it always points to
+#   the STABLE (blue) set of pods. During a rollout, only after explicit
+#   promotion does Rollouts update this selector to the new (green) pods.
+#
+# BLUEGREEN MECHANICS:
+#   Before promotion: selector → pods with rollout-id=<old-hash> (blue)
+#   After promotion:  selector → pods with rollout-id=<new-hash> (green, now blue)
+#
+# The Ingress routes /api → backend-active:80 → these pods.
+# Users never see the new version until a human promotes the rollout.
+#
+# ROLE LABEL: role: active — purely for human readability in kubectl output.
+#   Rollouts ignores this label; it manages the rollout-id selector itself.
+
 apiVersion: v1
 kind: Service
 metadata:

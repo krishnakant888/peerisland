@@ -1,3 +1,37 @@
+# ── Application Ingress ───────────────────────────────────────────────────────
+#
+# PURPOSE: Routes external HTTPS traffic to the backend and frontend services,
+#   and also exposes preview (green) endpoints during active BlueGreen rollouts.
+#
+# TRAFFIC FLOW:
+#   Internet → Azure LB (public IP) → ingress-nginx controller pod
+#   → Ingress rules here → backend-active / frontend-active services → blue pods
+#
+# FOUR ROUTES:
+#   /api        → backend-active:80   (production API — blue pods only)
+#   /           → frontend-active:80  (production UI  — blue pods only)
+#   /preview/api → backend-preview:80  (green pods — only have pods during a rollout)
+#   /preview    → frontend-preview:80  (green pods — 503 when no rollout in progress)
+#
+# BLUEGREEN PREVIEW PATHS:
+#   These /preview/* paths let the team test the new (green) version of the app
+#   at a real URL before promoting it to production traffic. QA team visits
+#   /preview to test, then approves the rollout in ArgoCD → 100% traffic shifts.
+#
+# TLS: cert-manager.io/cluster-issuer: "zerossl" triggers automatic cert issuance.
+#   The signed cert is stored in secret "peerisland-tls" (auto-created by cert-manager).
+#   ssl-redirect: "true" enforces HTTPS — any HTTP request gets a 301 redirect.
+#
+# SECURITY HEADERS (configuration-snippet):
+#   These headers protect against common web attacks:
+#   - X-Content-Type-Options: nosniff — prevents MIME sniffing attacks
+#   - X-Frame-Options: DENY — prevents clickjacking
+#   - X-XSS-Protection — legacy IE XSS filter (belt-and-suspenders)
+#   - Referrer-Policy — limits referrer info sent to third-party sites
+#
+# proxy-body-size: "1m" — limits request body to 1MB, preventing oversized
+#   payload DoS attacks on the backend API.
+
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:

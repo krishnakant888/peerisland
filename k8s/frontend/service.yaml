@@ -1,3 +1,12 @@
+# ── Frontend Service (ClusterIP) ──────────────────────────────────────────────
+#
+# PURPOSE: Generic cluster-internal service for frontend pods — used for
+#   health checks and internal access patterns that don't need BlueGreen routing.
+#   Mirrors the same 3-service pattern as backend.
+#
+# Frontend runs on port 3000 (Next.js / React dev server or nginx static serving).
+# The Ingress routes / → frontend-active:80 → targetPort: 3000.
+
 apiVersion: v1
 kind: Service
 metadata:

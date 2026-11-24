@@ -1,3 +1,34 @@
+# ── ClusterIssuers — TLS Certificate Authorities ──────────────────────────────
+#
+# PURPOSE: Defines FOUR ClusterIssuers — the CA configurations that cert-manager
+#   uses to issue TLS certificates for Ingress objects. Each is a different CA
+#   with a different trust model.
+#
+# HOW cert-manager USES THESE:
+#   1. An Ingress has annotation: cert-manager.io/cluster-issuer: "zerossl"
+#   2. cert-manager reads the annotation → finds this ClusterIssuer
+#   3. It starts an ACME HTTP-01 challenge: creates a temporary /.well-known/
+#      path in the Ingress that the CA hits to verify domain ownership
+#   4. CA issues the cert → cert-manager stores it in the secretName
+#   5. cert-manager auto-renews ~30 days before expiry (zero manual work)
+#
+# THE FOUR ISSUERS:
+#
+#   selfsigned  — no CA, signs its own certificate. Used ONLY to bootstrap the
+#                 internal CA cert (selfsigned-ca). Not for public-facing Ingresses.
+#
+#   letsencrypt — free public CA via ACME. 50 certs/week rate limit.
+#                 Use for staging/dev or if ZeroSSL has issues. NOT active prod issuer.
+#
+#   zerossl     — free public CA via ACME. NO rate limit. ACTIVE PRODUCTION ISSUER.
+#                 Requires External Account Binding (EAB) — keyID + secret from
+#                 ZeroSSL dashboard, stored in zerossl-eab-secret (pre-created manually,
+#                 NOT in git). The k8s Secret must exist before first sync.
+#
+#   peerisland-ca — internal CA backed by selfsigned-ca root. Use for internal
+#                   services (Mimir, Loki internal endpoints) that only need
+#                   cluster-internal TLS, not publicly trusted certs.
+
 apiVersion: cert-manager.io/v1
 kind: ClusterIssuer
 metadata:

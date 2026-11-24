@@ -1,4 +1,32 @@
-﻿apiVersion: argoproj.io/v1alpha1
+﻿# ── ArgoCD Application: monitoring-alloy ─────────────────────────────────────
+#
+# PURPOSE: Deploys Grafana Alloy as a DaemonSet — one pod per node — to collect
+#   metrics AND logs AND forward OTLP traces from every node simultaneously.
+#
+# WHY ALLOY instead of Prometheus + Fluentd separately?
+#   Alloy (formerly Grafana Agent Flow) is a single collector binary that replaces
+#   three agents: it scrapes Prometheus metrics, tails pod logs, AND receives
+#   OTLP traces. One DaemonSet instead of three means less memory per node and
+#   one config surface.
+#
+# DATA FLOW:
+#   Metrics: Alloy scrapes kubelet/pods → remote_write → Mimir (long-term storage)
+#   Logs:    Alloy tails /var/log/pods → push → Loki
+#   Traces:  App sends OTLP → alloy-otlp Service → Alloy → Tempo
+#
+# MULTI-SOURCE PATTERN: `sources` (plural) lets us reference the Helm chart from
+#   grafana.github.io AND the values file from our git repo in a single Application.
+#   The `ref: values` source is never deployed — it only provides the values file
+#   path alias ($values) used in the helm.valueFiles field of the other source.
+#
+# SYNC WAVE 1: alloy-config ConfigMap (wave 0) must be deployed first so the
+#   DaemonSet pods can mount it on first start. Wave ordering prevents crashloop.
+#
+# ignoreDifferences on updateStrategy: AKS sometimes patches DaemonSet
+#   updateStrategy fields post-deploy. Without this, ArgoCD would loop forever
+#   trying to revert the AKS-managed change.
+
+apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
   name: monitoring-alloy

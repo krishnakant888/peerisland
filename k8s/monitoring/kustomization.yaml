@@ -1,3 +1,28 @@
+# ── Monitoring Resources Kustomization ────────────────────────────────────────
+#
+# PURPOSE: Groups all in-cluster observability manifests deployed alongside
+#   the peerisland app. These resources live in the monitoring namespace and
+#   extend the LGTM stack with app-specific configuration.
+#
+# WHAT'S IN THIS DIRECTORY:
+#   otel-collector-service.yaml   — ClusterIP Service giving Alloy a stable DNS name
+#                                    for OTLP trace ingestion (alloy-otlp.monitoring:4317)
+#   secret-provider-grafana.yaml  — CSI SecretProviderClass: syncs Grafana admin
+#                                    credentials from Azure Key Vault to a k8s Secret
+#   mimir-recording-rules.yaml    — Pre-computed SLI/SLO metrics in Mimir (fast queries)
+#   grafana-alert-rules.yaml      — Application-level alert rules (error rate, latency, saturation)
+#   grafana-dashboards.yaml       — Request rate / error rate / latency overview dashboard
+#   dashboard-tracing.yaml        — Distributed traces waterfall dashboard (Tempo datasource)
+#   dashboard-daily-report.yaml   — 24h business summary dashboard (requests, errors, SLI score)
+#   network-policies.yaml         — Restricts monitoring namespace egress/ingress
+#   daily-report-cronjob.yaml     — CronJob that queries Mimir+Loki and pushes a daily summary
+#
+# WHY COLOCATED WITH APP (not inside argocd/applications/)?
+#   These resources are tightly coupled to the app — they alert on app metrics,
+#   display app dashboards, and use app-specific label selectors. They change
+#   whenever the app's metric names or SLO thresholds change. Keeping them in
+#   k8s/monitoring/ means one PR changes both the app and its observability together.
+
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 

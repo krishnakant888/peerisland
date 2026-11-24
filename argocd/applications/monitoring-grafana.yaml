@@ -1,4 +1,31 @@
-﻿apiVersion: argoproj.io/v1alpha1
+﻿# ── ArgoCD Application: monitoring-grafana ───────────────────────────────────
+#
+# PURPOSE: Deploys Grafana — the single pane of glass for all observability data.
+#   Grafana connects to Mimir (metrics), Loki (logs), and Tempo (traces) as
+#   datasources and renders dashboards from ConfigMaps in the monitoring namespace.
+#
+# CREDENTIAL SECURITY:
+#   The admin password is NOT set here (would appear in git in plaintext).
+#   Instead: the CSI Secrets Store driver (secret-provider-grafana.yaml) pulls
+#   the credentials from Azure Key Vault and writes them to a k8s Secret named
+#   grafana-admin-secret. Grafana reads that secret via admin.existingSecret in
+#   grafana-values.yaml. This is the Workload Identity flow: no static credentials,
+#   no rotation needed.
+#
+# SYNC WAVE 2: Grafana must come AFTER Mimir/Loki/Tempo (wave 1) so the datasource
+#   probes on first start connect successfully. If Grafana starts before its
+#   backends, the datasource health checks fail and Grafana logs "datasource error"
+#   on every dashboard load.
+#
+# ignoreDifferences on /spec/replicas: when HPA or manual kubectl scale adjusts
+#   the replica count, ArgoCD would revert it to the Helm-specified value on the
+#   next sync. This entry tells ArgoCD to leave replicas alone after the first deploy.
+#
+# DASHBOARD PROVISIONING: any ConfigMap in the monitoring namespace with label
+#   grafana_dashboard: "1" is auto-imported by the Grafana sidecar. We use this
+#   for dashboard-tracing.yaml, dashboard-daily-report.yaml, and grafana-dashboards.yaml.
+
+apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
   name: monitoring-grafana

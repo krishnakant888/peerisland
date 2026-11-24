@@ -1,10 +1,33 @@
-﻿apiVersion: argoproj.io/v1alpha1
+﻿# ── ArgoCD Application: argo-rollouts ────────────────────────────────────────
+#
+# PURPOSE: Installs the Argo Rollouts controller — the engine that powers
+#   BlueGreen deployments for the backend and frontend workloads.
+#
+# WHY ARGO ROLLOUTS instead of standard Deployment + RollingUpdate?
+#   Standard RollingUpdate replaces pods one at a time with no traffic control.
+#   Argo Rollouts lets us route 100% of traffic to the stable (blue) version
+#   while the new (green) version starts up and passes health checks. We then
+#   manually promote — giving us a human gate before any user sees the new code.
+#   This is critical for a production SaaS: a bad deploy stays invisible to users
+#   until we explicitly approve it.
+#
+# SYNC WAVE 2: Must come AFTER cert-manager (wave 0) and ingress-nginx (wave 1).
+#   The Rollout CRDs must exist before peerisland-app (wave 3) deploys Rollout
+#   objects — otherwise ArgoCD fails with "no matches for kind Rollout".
+#
+# CONTROLLER PLACEMENT: runs on user node pool (not system), so it doesn't
+#   compete with kube-system components for system pool resources.
+#
+# DASHBOARD: enabled with ClusterIP — accessible via kubectl port-forward
+#   or through the ArgoCD UI. Shows rollout status, canary weights, history.
+
+apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
   name: argo-rollouts
   namespace: argocd
   annotations:
-    argocd.argoproj.io/sync-wave: "2"
+    argocd.argoproj.io/sync-wave: "2"  # after cert-manager (0) and ingress-nginx (1)
   finalizers:
     - resources-finalizer.argocd.argoproj.io
 spec:
@@ -13,13 +36,13 @@ spec:
   source:
     repoURL: https://argoproj.github.io/argo-helm
     chart: argo-rollouts
-    targetRevision: "2.37.6"
+    targetRevision: "2.37.6"  # pinned — Rollout CRD changes between versions
     helm:
       values: |
         controller:
           replicas: 1
           nodeSelector:
-            kubernetes.azure.com/mode: user
+            kubernetes.azure.com/mode: user  # keep off system pool
           tolerations: []
           resources:
             requests:
@@ -35,9 +58,9 @@ spec:
             readOnlyRootFilesystem: true
 
         dashboard:
-          enabled: true
+          enabled: true  # view rollout status at kubectl port-forward svc/argo-rollouts-dashboard 3100
           service:
-            type: ClusterIP
+            type: ClusterIP  # not exposed externally — access via port-forward
           securityContext:
             runAsNonRoot: true
 
@@ -59,4 +82,4 @@ spec:
       selfHeal: true
     syncOptions:
       - CreateNamespace=true
-      - SkipDryRunOnMissingResource=true
+      - SkipDryRunOnMissingResource=true  # CRDs may not exist on first install

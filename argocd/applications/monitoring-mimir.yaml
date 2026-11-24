@@ -1,4 +1,29 @@
-﻿apiVersion: argoproj.io/v1alpha1
+﻿# ── ArgoCD Application: monitoring-mimir ─────────────────────────────────────
+#
+# PURPOSE: Deploys Grafana Mimir — the long-term metrics storage backend.
+#   Alloy remote_writes all scraped Prometheus metrics here. Grafana connects
+#   to Mimir as a "Prometheus-compatible" datasource to query historical metrics.
+#
+# WHY MIMIR instead of plain Prometheus?
+#   Prometheus stores metrics on a local PVC and can't scale horizontally.
+#   For a production stack that needs >15 days of metrics history without a
+#   huge PVC, Mimir writes to Azure Blob Storage (infinite retention, cheap).
+#   Mimir's API is 100% Prometheus-compatible — no changes needed in Grafana.
+#
+# CUSTOM MANIFESTS (not Helm): Mimir is deployed via raw YAML in monitoring/mimir/
+#   instead of the Helm chart because the Helm chart requires complex values for
+#   single-binary mode and was harder to debug at this stack size. Raw YAML is
+#   explicit and easier to explain in an interview.
+#
+# ignoreDifferences: Mimir runs as a StatefulSet. After the first deploy, AKS/k8s
+#   adds fields (podManagementPolicy, revisionHistoryLimit, etc.) that weren't in
+#   the original YAML. Without ignoreDifferences, ArgoCD tries to remove them on
+#   every sync and gets into a drift loop. This is a known StatefulSet + ArgoCD pattern.
+#
+# SYNC WAVE 1: Mimir must be ready before Grafana (wave 2) so datasource probes pass.
+#   Also before prometheus-adapter (wave 2) which reads Mimir for custom metrics.
+
+apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
   name: monitoring-mimir

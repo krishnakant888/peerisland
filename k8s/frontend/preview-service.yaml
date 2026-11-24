@@ -1,3 +1,9 @@
+# ── Frontend Preview Service (BlueGreen — green/new traffic) ─────────────────
+#
+# PURPOSE: Same BlueGreen pattern as backend-preview but for the frontend Rollout.
+#   Routes /preview traffic to the new (green) frontend version.
+#   Returns 503 when no rollout is in progress (Rollouts points selector to no pods).
+
 apiVersion: v1
 kind: Service
 metadata:

@@ -1,3 +1,30 @@
+# ── Daily Report CronJob ──────────────────────────────────────────────────────
+#
+# PURPOSE: Runs a shell script at 00:05 UTC every day that:
+#   1. Queries Mimir for 24h business metrics (request count, error rate, SLI score,
+#      error budget remaining, p99 latency)
+#   2. Pushes a formatted text summary into Loki under the "daily-report" stream
+#   3. The dashboard-daily-report.yaml Grafana dashboard reads Loki for this log line
+#
+# WHY A CRONJOB instead of a Grafana scheduled report?
+#   Grafana Enterprise (paid) has scheduled PDF reports. We're on the free tier.
+#   A simple shell script querying Mimir's HTTP API achieves the same result at
+#   zero cost — the output appears in Loki as a searchable log line.
+#
+# HOW TO VIEW: Grafana → Explore → Loki → {service="daily-report"} → see summaries
+#   Each line is a formatted metric snapshot for that date.
+#
+# SCRIPT STRUCTURE (generate-report.sh):
+#   - query()     — HTTP GET to Mimir's /api/v1/query endpoint, extracts .data.result[0].value[1]
+#   - loki_push() — HTTP POST to Loki's /loki/api/v1/push with the report line
+#   - log()       — prints to stdout AND pushes to Loki (double-writes for visibility)
+#   - Gathers: total requests, error count, error rate, SLI score, error budget,
+#              1h burn rate, 24h burn rate, p99 latency
+#   - Formats everything into a single human-readable summary line
+#
+# SCHEDULE: "5 0 * * *" = 00:05 UTC daily (5 minutes past midnight to ensure
+#   the previous day's metrics are fully ingested before querying)
+
 apiVersion: v1
 kind: ConfigMap
 metadata:

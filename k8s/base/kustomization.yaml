@@ -1,3 +1,26 @@
+# ── Base Kustomization ────────────────────────────────────────────────────────
+#
+# PURPOSE: Declares every Kubernetes resource that belongs to the peerisland app.
+#   This is the SINGLE SOURCE OF TRUTH for what gets deployed. Overlays
+#   (k8s/overlays/production, staging, uat) layer on top of this base.
+#
+# KUSTOMIZE PATTERN:
+#   base/   = environment-agnostic resources (same manifest for all envs)
+#   overlay = environment-specific patches (image tag, replica count, hostname)
+#
+# WHAT'S IN BASE:
+#   - Namespaces (peerisland, monitoring) — isolation boundaries
+#   - ServiceAccount — shared SA for backend/frontend pods
+#   - NetworkPolicy — restricts cross-namespace traffic
+#   - Rollouts — the Argo Rollouts BlueGreen deployment specs
+#   - Services — ClusterIP for pod-to-pod and active/preview for traffic routing
+#   - Ingress — HTTPS routing rules with preview paths
+#   - autoscaling/ — HPA, VPA, PDB
+#   - monitoring/ — Grafana dashboards, alert rules, OTEL service, CSI secret provider
+#
+# PRODUCTION OVERLAY adds the ACR image tag patch so the right Docker image
+#   is deployed without changing the base manifest.
+
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 

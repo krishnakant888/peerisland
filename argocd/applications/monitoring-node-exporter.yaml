@@ -1,3 +1,25 @@
+# ── ArgoCD Application: monitoring-node-exporter ─────────────────────────────
+#
+# PURPOSE: Deploys the Prometheus Node Exporter as a DaemonSet — one pod per
+#   node — to expose low-level host metrics: CPU, memory, disk I/O, network,
+#   file descriptors, systemd unit status.
+#
+# WHY NEEDED alongside Alloy?
+#   Alloy scrapes pod-level and k8s-level metrics. Node Exporter exposes the
+#   underlying Linux host metrics that the kubelet doesn't report. Without it,
+#   we can't alert on node disk pressure, CPU steal, or NIC errors.
+#
+# TYPICAL ALERTS THIS ENABLES:
+#   - Node disk >85% used (triggers before PVC eviction)
+#   - Node CPU >90% sustained (indicates scheduling pressure)
+#   - Node memory available <500Mi (indicates imminent OOMKill)
+#
+# DaemonSet placement: runs on ALL nodes (system + user) because we want host
+#   metrics for every node where workloads can be scheduled.
+#
+# ignoreDifferences on updateStrategy: same pattern as Alloy — AKS modifies
+#   the DaemonSet updateStrategy post-deploy and ArgoCD would loop on the diff.
+
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:

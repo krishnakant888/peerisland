@@ -1,3 +1,30 @@
+# ── Autoscaling Kustomization ─────────────────────────────────────────────────
+#
+# PURPOSE: Groups all autoscaling resources for backend and frontend.
+#   This directory is referenced from k8s/base/kustomization.yaml and deployed
+#   as part of the peerisland app ArgoCD application.
+#
+# THREE-LAYER AUTOSCALING STRATEGY:
+#
+#   HPA (Horizontal Pod Autoscaler) — scales REPLICA COUNT
+#     - Backend scales on http_requests_per_second + p99 latency (from Mimir via prometheus-adapter)
+#     - Frontend scales on nginx_active_connections_per_pod
+#     - Min: 2 replicas (HA), Max: 10 replicas
+#
+#   VPA (Vertical Pod Autoscaler) — scales RESOURCE REQUESTS
+#     - Adjusts CPU/memory requests based on actual usage history
+#     - Mode: RequestsOnly (never touches limits — prevents OOMKill from bad recommendations)
+#     - VPA is commented out until VPA CRDs are installed (see below)
+#
+#   PDB (PodDisruptionBudget) — PREVENTS UNAVAILABILITY during node drains
+#     - Ensures at least 1 pod stays running during cluster upgrades, AKS node rotation,
+#       VPA evictions, or manual node cordoning
+#     - Without PDB, a node drain could kill all pods simultaneously
+#
+# VPA CRD NOTE: The VPA CRDs (VerticalPodAutoscaler) are not installed by default
+#   in AKS. Install them manually before uncommenting the VPA resources:
+#   kubectl apply -f https://github.com/kubernetes/autoscaler/releases/latest/download/vertical-pod-autoscaler.yaml
+
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 

@@ -1,4 +1,24 @@
-﻿apiVersion: argoproj.io/v1alpha1
+﻿# ── ArgoCD Application: monitoring-alloy-config ───────────────────────────────
+#
+# PURPOSE: Deploys the Alloy configuration ConfigMap BEFORE the Alloy DaemonSet
+#   starts. The ConfigMap contains the River-language pipeline definition that
+#   tells Alloy what to scrape, what to tail, and where to forward data.
+#
+# WHY WAVE 0?
+#   The monitoring-alloy DaemonSet (wave 1) mounts this ConfigMap as a volume.
+#   If the ConfigMap doesn't exist when the DaemonSet pods start, they enter
+#   CrashLoopBackOff because the volume mount fails. Wave ordering is the only
+#   way to enforce this sequencing in GitOps.
+#
+# SOURCE: monitoring/alloy/ in the git repo contains:
+#   - config.alloy: the River pipeline (discover, scrape, write components)
+#   - kustomization.yaml: wraps it into a ConfigMap resource
+#
+# CHANGE PROCESS: edit monitoring/alloy/config.alloy → commit → push →
+#   ArgoCD syncs this ConfigMap → Alloy DaemonSet rolling restarts automatically
+#   (Alloy watches its config volume for changes and hot-reloads without restart).
+
+apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
   name: monitoring-alloy-config

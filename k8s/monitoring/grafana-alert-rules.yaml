@@ -1,3 +1,32 @@
+# ── Grafana Alert Rules ConfigMap ─────────────────────────────────────────────
+#
+# PURPOSE: Defines application-level Grafana Managed Alerts for the peerisland
+#   backend and frontend. These fire to the platform team (PagerDuty/Slack)
+#   when SLO-threatening conditions are detected.
+#
+# HOW GRAFANA PICKS THIS UP:
+#   The label grafana_alert: "1" is watched by the Grafana sidecar (provisioner).
+#   It auto-imports this ConfigMap as alert rules under the "PeerIsland" folder
+#   in Grafana. No manual UI step needed — just commit, ArgoCD syncs, Grafana reloads.
+#
+# ALERT CATEGORIES:
+#
+#   BackendHighErrorRate (critical, 5m)
+#     Fires when: 5xx errors > 5% of total requests over 5 minutes
+#     Threshold: 0.05 (SLO budget is 0.1% error rate — 5% is a severe breach)
+#     Action: check pod logs, recent deploy, database connectivity
+#
+#   BackendHighP99Latency (critical, 10m)
+#     Fires when: p99 response time > 1 second sustained for 10 min
+#     Why p99: average latency masks tail latency; 1% of users having >1s responses
+#     is a production quality issue even if average looks fine
+#
+#   (more rules continue in the file — backend saturation, frontend errors,
+#    pod restarts, PVC pressure, etc.)
+#
+# DATASOURCE: mimir — all queries run against Mimir's Prometheus-compatible API.
+#   Mimir UID in Grafana is "mimir" (configured in grafana-values.yaml datasource).
+
 apiVersion: v1
 kind: ConfigMap
 metadata:

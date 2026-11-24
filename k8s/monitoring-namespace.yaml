@@ -1,3 +1,21 @@
+# ── Monitoring Namespace ──────────────────────────────────────────────────────
+#
+# PURPOSE: Creates the monitoring namespace for the LGTM observability stack:
+#   Alloy (collector), Mimir (metrics), Loki (logs), Tempo (traces), Grafana (UI),
+#   plus kube-state-metrics, node-exporter, and prometheus-adapter.
+#
+# CRITICAL LABEL: kubernetes.io/metadata.name: monitoring
+#   This label is required by k8s/network-policy.yaml's namespaceSelector.
+#   The NetworkPolicy allows traffic FROM the monitoring namespace TO peerisland
+#   app pods (so Alloy can scrape metrics on port 3001/3000).
+#   Without this label the namespaceSelector matches nothing → Alloy scrape
+#   requests are dropped by the NetworkPolicy → no metrics collected.
+#
+# WHY NOT let ArgoCD create this namespace (CreateNamespace=true)?
+#   ArgoCD's auto-create does not add the metadata.name label. The NetworkPolicy
+#   then breaks silently — no metrics, no alert until someone notices the dashboards
+#   are empty. Declaring it explicitly here guarantees the label is always present.
+
 apiVersion: v1
 kind: Namespace
 metadata:

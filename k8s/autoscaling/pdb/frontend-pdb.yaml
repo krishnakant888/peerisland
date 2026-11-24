@@ -1,3 +1,12 @@
+# ── Frontend PodDisruptionBudget ──────────────────────────────────────────────
+#
+# PURPOSE: Same as backend-pdb — ensures at least 1 frontend pod stays running
+#   during voluntary disruptions (node drain, AKS upgrade, VPA eviction).
+#
+# minAvailable: 1 — if HPA is at minimum (2 replicas), draining a node will
+#   evict 1 pod and block until it's rescheduled, keeping 1 pod serving traffic.
+#   Without PDB, both pods could be evicted at once during a 2-node drain → downtime.
+
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:

@@ -1,3 +1,29 @@
+# ── Grafana Dashboard: Tracing ────────────────────────────────────────────────
+#
+# PURPOSE: Grafana dashboard showing distributed trace data from Tempo.
+#   Displays span rate, error rate, and p50/p99/p999 latency per service,
+#   with drill-down into individual trace waterfalls.
+#
+# HOW IT'S PROVISIONED: same ConfigMap label sidecar pattern as other dashboards.
+#   grafana_dashboard: "1" → Grafana sidecar auto-imports it.
+#
+# DATASOURCES USED:
+#   - Mimir (UID: "mimir") — for SpanMetrics: calls_total, duration_bucket
+#     (Tempo writes spanmetrics back to Mimir via its spanmetrics processor)
+#   - Tempo (UID: "tempo") — for the actual trace waterfall panels
+#
+# TEMPLATE VARIABLE: $service — dropdown populated from Mimir label values.
+#   Selecting "backend" or "frontend" filters all panels to that service's spans.
+#
+# KEY PANELS:
+#   - Request Rate (by service) — traces_spanmetrics_calls_total
+#   - Error Rate (by service)   — 5xx span count / total
+#   - P50/P99/P999 Latency      — histogram_quantile over spanmetrics buckets
+#   - Trace Search              — Tempo datasource, free-form trace ID search
+#
+# CORRELATED OBSERVABILITY: panels link to Loki log lines via traceId.
+#   Click a slow span → "Logs for this trace" → Loki query with traceId filter.
+
 apiVersion: v1
 kind: ConfigMap
 metadata:

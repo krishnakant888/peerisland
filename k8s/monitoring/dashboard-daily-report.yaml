@@ -1,3 +1,29 @@
+# ── Grafana Dashboard: Daily Report ──────────────────────────────────────────
+#
+# PURPOSE: Grafana dashboard showing a 24-hour business summary — total requests,
+#   error count, SLI score, error budget remaining, and burn rate.
+#
+# AUDIENCE: Engineering leads and product owners who want a one-glance health
+#   summary without navigating into detailed metric panels.
+#
+# HOW IT'S PROVISIONED:
+#   The label grafana_dashboard: "1" is watched by the Grafana sidecar.
+#   The annotation grafana_folder: PeerIsland puts it in the "PeerIsland" folder.
+#   No manual UI step needed — commit → ArgoCD syncs → Grafana imports automatically.
+#
+# DATA SOURCE: Mimir (UID: "mimir") — all panels query Mimir for 24h aggregates.
+#
+# KEY PANELS:
+#   - Total Requests (24h) — sum of all HTTP requests
+#   - Error Count (24h)    — 5xx count
+#   - SLI Score            — 1 - error_ratio (target: >0.999)
+#   - Error Budget Left    — % of monthly budget remaining (SLO: 99.9% uptime)
+#   - Burn Rate (1h)       — how fast error budget is being consumed
+#   - Request rate graph   — time series over 24h
+#
+# COMPANION: daily-report-cronjob.yaml runs at 00:05 UTC and pushes a text
+#   summary of these same metrics into Loki so they appear in the Logs panel.
+
 apiVersion: v1
 kind: ConfigMap
 metadata:

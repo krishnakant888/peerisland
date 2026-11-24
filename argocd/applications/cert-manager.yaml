@@ -1,3 +1,32 @@
+# ── ArgoCD Application: cert-manager ─────────────────────────────────────────
+#
+# PURPOSE: Installs cert-manager — the TLS certificate lifecycle manager.
+#   It automatically provisions, renews, and rotates TLS certificates for
+#   all Ingress objects annotated with cert-manager.io/cluster-issuer.
+#
+# HOW IT WORKS:
+#   1. cert-manager watches Ingress objects for the cluster-issuer annotation
+#   2. It creates a Certificate resource and starts an ACME challenge
+#   3. For HTTP-01: it creates a temporary Ingress path (/.well-known/acme-challenge/)
+#      that Let's Encrypt / ZeroSSL hits to verify domain ownership
+#   4. On success, it stores the signed cert in the secretName specified in the Ingress
+#   5. It auto-renews ~30 days before expiry — zero manual intervention
+#
+# SYNC WAVE 0: Must be the FIRST thing deployed. cert-manager installs CRDs
+#   (Certificate, ClusterIssuer, etc.) that ALL other components depend on.
+#   If anything else deploys first and references these CRDs, ArgoCD fails.
+#
+# installCRDs: true — installs CRDs as part of the Helm release so they are
+#   managed and upgraded automatically. Alternative is a separate CRD job.
+#
+# NODE PLACEMENT: system node pool — cert-manager is infrastructure, not an app.
+#   The CriticalAddonsOnly toleration lets it schedule despite the system taint.
+#
+# ignoreDifferences: cert-manager-cainjector modifies webhook caBundle fields
+#   after deploy (injects its own CA). ArgoCD sees this as drift and would
+#   continuously try to revert it. ignoreDifferences tells ArgoCD to leave those
+#   fields alone — this is a known cert-manager + ArgoCD integration pattern.
+
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
