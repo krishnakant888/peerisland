@@ -1,15 +1,10 @@
 # ── HorizontalPodAutoscaler for the frontend ──────────────────────────────────
 #
-# WHY different metrics than the backend?
-#   The frontend is a static file server (nginx). It doesn't process business logic
-#   or hit databases, so request duration / p99 latency is not meaningful here.
-#   The bottleneck for nginx is concurrent connections — when too many clients are
-#   open simultaneously, response times creep up.  nginx_active_connections is
-#   therefore the primary signal.
+# Scales on CPU and Memory — native Resource metrics via metrics-server.
+# No prometheus-adapter or custom metric setup required.
 #
-# WHY lower maxReplicas (10) than backend (20)?
-#   nginx scales much more efficiently than a Node.js API — a single nginx pod can
-#   comfortably handle hundreds of concurrent connections. We don't need as many pods.
+# Frontend is a static file server (nginx). CPU spikes under high concurrency
+# and memory grows with open connections, making both good scale signals.
 #
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
@@ -20,47 +15,41 @@ metadata:
     app: frontend
     component: autoscaling
 spec:
-  # Targets the Argo Rollout — same requirement as backend HPA
   scaleTargetRef:
     apiVersion: argoproj.io/v1alpha1
     kind: Rollout
     name: frontend
 
   minReplicas: 2   # always HA — single replica = SPOF
-  maxReplicas: 10
+  maxReplicas: 10  # nginx scales efficiently; fewer pods needed than backend
 
   metrics:
-    # ── Metric 1: nginx active connections per pod ────────────────────────────
-    # Primary scale trigger. 200 concurrent connections per pod is comfortable
-    # for nginx. Above this, response times start to degrade.
-    # This custom metric comes from the nginx prometheus exporter (nginx-prometheus-exporter
-    # sidecar) scraped by Alloy and exposed via prometheus-adapter.
-    - type: Pods
-      pods:
-        metric:
-          name: nginx_active_connections_per_pod
-        target:
-          type: AverageValue
-          averageValue: "200"
-
-    # ── Metric 2: CPU (safety net) ────────────────────────────────────────────
-    # Same reasoning as backend: 80% of VPA-managed request = very high utilisation.
-    # Only fires for genuine runaway load (e.g. DDoS with many small requests).
+    # ── Metric 1: CPU utilization ─────────────────────────────────────────────
+    # nginx is CPU-bound under high concurrency (TLS handshakes, compression).
+    # 70% threshold matches backend for consistency.
     - type: Resource
       resource:
         name: cpu
         target:
           type: Utilization
-          averageUtilization: 80
+          averageUtilization: 70
 
-    # Memory absent — VPA owns it.
+    # ── Metric 2: Memory utilization ──────────────────────────────────────────
+    # nginx buffers connections in memory; 80% signals connection pressure
+    # before OOM restarts occur.
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80
 
   # ── Scaling behaviour ─────────────────────────────────────────────────────
   behavior:
     scaleUp:
-      # 60s window (more conservative than backend's 30s).
-      # Static file serving has very little warm-up cost — a new pod is ready
-      # almost instantly — but we still want to avoid over-reaction.
+      # 60s stabilisation (more conservative than backend).
+      # nginx pods start near-instantly so we can afford to wait slightly longer
+      # and avoid reacting to brief spikes.
       stabilizationWindowSeconds: 60
       policies:
         - type: Pods
@@ -69,7 +58,7 @@ spec:
       selectPolicy: Max
 
     scaleDown:
-      # 5-minute window before removing pods — same caution as backend.
+      # 5-minute window before removing pods.
       stabilizationWindowSeconds: 300
       policies:
         - type: Pods

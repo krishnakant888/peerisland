@@ -1,20 +1,14 @@
 # ── HorizontalPodAutoscaler for the backend ───────────────────────────────────
 #
-# WHY three metrics instead of just CPU?
-#   CPU alone is a lagging indicator. Under a sudden traffic spike, pods CPU
-#   may still look fine while request queues back up and p99 latency explodes.
-#   This HPA uses three signals in combination:
-#     1. RPS (requests per second) — primary scaling trigger
-#     2. p99 latency — catches latency degradation that RPS misses
-#     3. CPU — safety net for runaway compute
-#   Kubernetes HPA automatically picks the MAXIMUM desired replica count across
-#   all metrics, so any single metric can trigger scale-out.
+# Scales on CPU and Memory — both are native Resource metrics served by
+# metrics-server, so no prometheus-adapter or custom metric setup is needed.
 #
-# WHY no memory metric?
-#   VPA (Vertical Pod Autoscaler) owns memory requests.  If HPA also scaled
-#   on memory %, VPA adjusting memory requests would change the denominator
-#   (request value), causing the same feedback loop problem as CPU.
-#   Separating concerns: HPA handles horizontal scale, VPA handles resource sizing.
+# WHY no memory metric conflict with VPA?
+#   VPA (Vertical Pod Autoscaler) is set to RequestsOnly — it adjusts the
+#   resource *request* value, not the limit.  HPA measures utilisation as
+#   (actual usage / request).  When VPA changes the request, the utilisation
+#   ratio re-normalises automatically, so both controllers converge rather than
+#   fight: VPA right-sizes the request, HPA reacts to actual load relative to it.
 #
 # IMPORTANT: scaleTargetRef points at a Rollout, not a Deployment.
 #   This stack uses Argo Rollouts for BlueGreen deployments.
@@ -39,53 +33,32 @@ spec:
   maxReplicas: 20  # hard ceiling to prevent runaway cost during traffic spikes
 
   metrics:
-    # ── Metric 1: HTTP requests per second (RPS) ──────────────────────────────
-    # Primary scale trigger. 50 rps per pod is the target — above this, HPA
-    # adds pods. The prometheus-adapter translates http_requests_total into a
-    # custom metric the HPA API can read.
-    # To verify the adapter is working:
-    #   kubectl get --raw /apis/custom.metrics.k8s.io/v1beta1 | jq .
-    - type: Pods
-      pods:
-        metric:
-          name: http_requests_per_second   # defined in prometheus-adapter ConfigMap
-        target:
-          type: AverageValue
-          averageValue: "50"               # scale when each pod handles > 50 rps
-
-    # ── Metric 2: p99 latency ─────────────────────────────────────────────────
-    # Catches degradation that pure RPS misses.
-    # Scenario: a downstream DB is slow → each request takes 2s → RPS drops
-    # (fewer requests finish) but latency is high. HPA scaling on RPS alone
-    # would actually SCALE IN (less load?). p99 catches the real problem.
-    # Threshold 500ms: our SLO target — normal p99 is 1-2ms, so this only fires
-    # under genuine stress or a slow dependency.
-    - type: Pods
-      pods:
-        metric:
-          name: http_request_duration_p99_seconds
-        target:
-          type: AverageValue
-          averageValue: "0.5"    # scale when p99 latency > 500ms per pod
-
-    # ── Metric 3: CPU utilization (safety net) ────────────────────────────────
-    # 80% of whatever VPA has set as the CPU request. At peak, VPA may set
-    # the request to 800m — 80% = 640m, still 360m below the 1000m limit.
-    # Only fires during CPU-intensive runaway load not captured by RPS/latency.
+    # ── Metric 1: CPU utilization ─────────────────────────────────────────────
+    # Primary scale trigger. 70% of the VPA-managed CPU request is the threshold —
+    # leaves headroom for request bursts before latency degrades.
     - type: Resource
       resource:
         name: cpu
         target:
           type: Utilization
-          averageUtilization: 80
+          averageUtilization: 70
 
-    # Memory is intentionally ABSENT — see file header comment.
+    # ── Metric 2: Memory utilization ──────────────────────────────────────────
+    # Secondary trigger. Node.js apps can hold large in-memory caches; scaling
+    # out before hitting OOM avoids pod restarts under heavy load.
+    # 80% threshold: higher than CPU because memory growth is more gradual and
+    # a brief spike rarely needs a new pod the way a CPU spike does.
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80
 
   # ── Scaling behaviour ─────────────────────────────────────────────────────
   behavior:
     scaleUp:
-      # 30s window: must see sustained need before adding pods.
-      # Short window = rapid response to traffic spikes (desirable for backend).
+      # 30s stabilisation: rapid response to traffic spikes.
       stabilizationWindowSeconds: 30
       policies:
         # Double capacity in 15s if the signal is very strong
@@ -100,8 +73,7 @@ spec:
 
     scaleDown:
       # 300s (5 min) stabilisation before removing pods.
-      # Prevents flapping: a brief lull doesn't immediately shrink the fleet
-      # only for traffic to spike again 2 minutes later.
+      # Prevents flapping after a brief traffic lull.
       stabilizationWindowSeconds: 300
       policies:
         # Remove at most 10% of fleet per minute
