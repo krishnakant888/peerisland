@@ -1,29 +1,63 @@
+# ── ArgoCD Application: ingress-nginx ────────────────────────────────────────
+#
+# PURPOSE: Deploys the NGINX Ingress Controller — the single entry point for
+#   all external HTTP/HTTPS traffic into the cluster.
+#
+# ROLE IN ARCHITECTURE:
+#   Internet → Azure Load Balancer → ingress-nginx controller → Ingress rules
+#   → backend-active / frontend-active services → pods
+#   The controller reads all Ingress objects in the cluster and routes traffic
+#   accordingly.  Without this, the Ingress in k8s/ingress.yaml does nothing.
+#
+# SYNC WAVE 1: Must be deployed BEFORE the app Ingress (wave 2) because the
+#   Ingress object references ingressClassName: nginx — if the IngressClass
+#   doesn't exist yet ArgoCD health checks fail.
+#
+# TWO LOAD BALANCERS (by design):
+#   1. External LB (azure-load-balancer-internal: false) — public IP, receives
+#      internet traffic.  Azure DNS label "peerisland" gives it the hostname
+#      peerisland.centralindia.cloudapp.azure.com.
+#   2. Internal LB (extraObjects service) — private IP inside the VNet, for
+#      internal cluster-to-cluster or VPN traffic without going out to internet.
+#
+# NODE PLACEMENT: nodeSelector + toleration pins the controller to system node
+#   pool nodes (kubernetes.azure.com/mode: system).  The CriticalAddonsOnly
+#   taint on system nodes normally repels user workloads — the toleration here
+#   explicitly allows the ingress controller to run there, keeping it off the
+#   user pool so app pods have full user-pool capacity.
+#
+# admissionWebhooks: false — the ingress-nginx admission webhook validates
+#   Ingress objects before apply.  Disabled here because it creates a chicken-
+#   and-egg problem during ArgoCD bootstrap: the webhook needs the controller
+#   running to validate, but ArgoCD can't finish deploying the controller while
+#   the webhook is blocking it.  Safe to disable for this stack size.
+
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
   name: ingress-nginx
   namespace: argocd
   annotations:
-    argocd.argoproj.io/sync-wave: "1"
+    argocd.argoproj.io/sync-wave: "1"  # deploy before app Ingress (wave 2)
   finalizers:
-    - resources-finalizer.argocd.argoproj.io
+    - resources-finalizer.argocd.argoproj.io  # ArgoCD cleans up all child resources on delete
 spec:
   project: default
 
   source:
     repoURL: https://kubernetes.github.io/ingress-nginx
     chart: ingress-nginx
-    targetRevision: "4.11.3"
+    targetRevision: "4.11.3"  # pinned — prevents surprise breaking changes on re-sync
     helm:
       values: |
         controller:
-          replicaCount: 1
+          replicaCount: 1  # single replica — increase to 2+ for HA in prod
           nodeSelector:
-            kubernetes.azure.com/mode: system
+            kubernetes.azure.com/mode: system  # run on system node pool
           tolerations:
             - key: CriticalAddonsOnly
               operator: Exists
-              effect: NoSchedule
+              effect: NoSchedule  # allow running despite system pool taint
           resources:
             requests:
               cpu: 100m
@@ -32,25 +66,27 @@ spec:
               cpu: 500m
               memory: 256Mi
           service:
-            appProtocol: false
+            appProtocol: false  # disabling appProtocol avoids Azure LB protocol conflicts
             annotations:
-              service.beta.kubernetes.io/azure-dns-label-name: "peerisland"
-              service.beta.kubernetes.io/azure-load-balancer-internal: "false"
+              service.beta.kubernetes.io/azure-dns-label-name: "peerisland"  # → peerisland.centralindia.cloudapp.azure.com
+              service.beta.kubernetes.io/azure-load-balancer-internal: "false"  # public-facing LB
               service.beta.kubernetes.io/azure-load-balancer-health-probe-protocol: "tcp"
           ingressClassResource:
             name: nginx
             enabled: true
-            default: true
+            default: true  # all Ingress objects without explicit class use nginx
           admissionWebhooks:
-            enabled: false
+            enabled: false  # disabled to avoid bootstrap chicken-and-egg problem
           extraObjects:
+            # Second service: internal Load Balancer for VNet-private access
+            # Useful for admin tools or inter-cluster traffic without going public
             - apiVersion: v1
               kind: Service
               metadata:
                 name: ingress-nginx-controller-internal
                 namespace: ingress-nginx
                 annotations:
-                  service.beta.kubernetes.io/azure-load-balancer-internal: "true"
+                  service.beta.kubernetes.io/azure-load-balancer-internal: "true"  # private IP
               spec:
                 type: LoadBalancer
                 selector:
@@ -67,12 +103,12 @@ spec:
 
   destination:
     server: https://kubernetes.default.svc
-    namespace: ingress-nginx
+    namespace: ingress-nginx  # dedicated namespace keeps ingress infra isolated
 
   syncPolicy:
     automated:
-      prune: true
-      selfHeal: true
+      prune: true      # remove resources deleted from chart
+      selfHeal: true   # revert manual kubectl edits automatically
     syncOptions:
-      - CreateNamespace=true
-      - SkipDryRunOnMissingResource=true
+      - CreateNamespace=true              # create ingress-nginx ns if missing
+      - SkipDryRunOnMissingResource=true  # skip dry-run for CRDs not yet installed
