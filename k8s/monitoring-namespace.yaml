@@ -2,7 +2,7 @@
 #
 # PURPOSE: Creates the monitoring namespace for the LGTM observability stack:
 #   Alloy (collector), Mimir (metrics), Loki (logs), Tempo (traces), Grafana (UI),
-#   plus kube-state-metrics, node-exporter, and prometheus-adapter.
+#   plus kube-state-metrics and node-exporter.
 #
 # CRITICAL LABEL: kubernetes.io/metadata.name: monitoring
 #   This label is required by k8s/network-policy.yaml's namespaceSelector.

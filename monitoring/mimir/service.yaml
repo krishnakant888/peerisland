@@ -6,7 +6,7 @@
 # mimir (ClusterIP):
 #   - port 8080 (http-metrics): Alloy remote-writes metrics here via HTTP POST
 #     to /api/v1/push.  Grafana queries via /prometheus (Prometheus-compatible API).
-#     Prometheus adapter also points here (see prometheus-adapter-values.yaml).
+#     Grafana also queries here for dashboards and alerts.
 #   - port 9095 (gRPC): used for inter-component communication in distributed mode;
 #     included for forward-compatibility if Mimir is later split into microservices.
 #

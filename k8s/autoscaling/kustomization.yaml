@@ -7,9 +7,8 @@
 # THREE-LAYER AUTOSCALING STRATEGY:
 #
 #   HPA (Horizontal Pod Autoscaler) — scales REPLICA COUNT
-#     - Backend scales on http_requests_per_second + p99 latency (from Mimir via prometheus-adapter)
-#     - Frontend scales on nginx_active_connections_per_pod
-#     - Min: 2 replicas (HA), Max: 10 replicas
+#     - Backend and frontend scale on CPU (70%) + Memory (80%) via metrics-server
+#     - Min: 2 replicas (HA), Max: 10/20 replicas
 #
 #   VPA (Vertical Pod Autoscaler) — scales RESOURCE REQUESTS
 #     - Adjusts CPU/memory requests based on actual usage history

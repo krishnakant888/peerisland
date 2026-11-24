@@ -21,7 +21,6 @@
 #   every sync and gets into a drift loop. This is a known StatefulSet + ArgoCD pattern.
 #
 # SYNC WAVE 1: Mimir must be ready before Grafana (wave 2) so datasource probes pass.
-#   Also before prometheus-adapter (wave 2) which reads Mimir for custom metrics.
 
 apiVersion: argoproj.io/v1alpha1
 kind: Application

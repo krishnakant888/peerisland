@@ -2396,7 +2396,7 @@ def phase8_wait_argocd(state: dict):
         "monitoring-mimir", "monitoring-loki", "monitoring-tempo", "monitoring-alloy",
         # wave 2
         "ingresses",
-        "monitoring-grafana", "monitoring-prometheus-adapter", "argo-rollouts",
+        "monitoring-grafana", "argo-rollouts",
         # wave 3
         "peerisland-app",
     ]
@@ -2617,7 +2617,6 @@ def phase8_wait_argocd(state: dict):
                     "monitoring-tempo":              "monitoring",
                     "monitoring-alloy":              "monitoring",
                     "monitoring-alloy-config":       "monitoring",
-                    "monitoring-prometheus-adapter": "monitoring",
                     "peerisland-app":                "peerisland",
                     "ingress-nginx":                 "ingress-nginx",
                     "cert-manager":                  "cert-manager",
@@ -2651,7 +2650,6 @@ def phase8_wait_argocd(state: dict):
                 stuck_mins = (now - first) / 60
                 if stuck_mins >= 5:
                     app_ns_map = {
-                        "monitoring-prometheus-adapter": "monitoring",
                         "monitoring-grafana":            "monitoring",
                         "monitoring-loki":               "monitoring",
                         "monitoring-tempo":              "monitoring",
@@ -2662,7 +2660,6 @@ def phase8_wait_argocd(state: dict):
                     }
                     ns = app_ns_map.get(name, "")
                     label_map = {
-                        "monitoring-prometheus-adapter": "app.kubernetes.io/name=prometheus-adapter",
                         "monitoring-grafana":            "app.kubernetes.io/name=grafana",
                         "monitoring-loki":               "app.kubernetes.io/name=loki",
                         "monitoring-tempo":              "app.kubernetes.io/name=tempo",
@@ -4444,7 +4441,6 @@ def _destroy_helm_releases(dry_run: bool):
         ("loki",               "monitoring"),
         ("tempo",              "monitoring"),
         ("mimir",              "monitoring"),
-        ("prometheus-adapter", "monitoring"),
         ("argo-rollouts",      "argo-rollouts"),
         ("cert-manager",       "cert-manager"),
         ("ingress-nginx",      "ingress-nginx"),
