@@ -1,0 +1,63 @@
+# ── Staging overlay ───────────────────────────────────────────────────────────
+# Uncomment and wire up when a staging environment is provisioned.
+# To activate:
+#   1. Create a staging AKS cluster / namespace via Terraform (var.environment = "staging")
+#   2. Add an ArgoCD Application pointing to k8s/overlays/staging/
+#   3. Update ACR name and image tags below
+#   4. Uncomment this entire file (remove the block comment markers)
+#
+# <!--
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+- ../../base/
+
+# ArgoCD / CI updates these image tags via:
+#   kustomize edit set image PLACEHOLDER_ACR/backend=<acr>/<repo>:<sha>
+images:
+- name: PLACEHOLDER_ACR/backend
+  newName: peerislandstagingacr.azurecr.io/backend
+  newTag: latest
+- name: PLACEHOLDER_ACR/frontend
+  newName: peerislandstagingacr.azurecr.io/frontend
+  newTag: latest
+
+# Staging-specific patches — lower replicas, relaxed resources
+patches:
+# Fewer replicas than prod — staging doesn't need HA
+- patch: |-
+    - op: replace
+      path: /spec/replicas
+      value: 1
+  target:
+    kind: Rollout
+    name: backend
+- patch: |-
+    - op: replace
+      path: /spec/replicas
+      value: 1
+  target:
+    kind: Rollout
+    name: frontend
+
+# Point ingress to staging hostname
+- patch: |-
+    - op: replace
+      path: /spec/rules/0/host
+      value: staging.peerisland.centralindia.cloudapp.azure.com
+    - op: replace
+      path: /spec/tls/0/hosts/0
+      value: staging.peerisland.centralindia.cloudapp.azure.com
+    - op: replace
+      path: /spec/tls/0/secretName
+      value: peerisland-staging-tls
+  target:
+    kind: Ingress
+    name: peerisland-ingress
+
+labels:
+- pairs:
+    environment: staging
+    managed-by: argocd
+# -->
